@@ -1,0 +1,11 @@
+<Window x:Class="Genesis.UI.MainWindow" xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation" xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml" Title="JOSHUA SPIKE 5.0 · GENESIS" Width="850" Height="640" MinWidth="600" MinHeight="440" Background="#E9EFF3" FontFamily="Segoe UI">
+  <Grid Margin="22"><Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/><RowDefinition Height="*"/><RowDefinition Height="Auto"/></Grid.RowDefinitions>
+    <StackPanel Grid.Row="0" Margin="0,0,0,18"><TextBlock Text="JOSHUA SPIKE 5.0" FontSize="27" FontWeight="SemiBold" Foreground="#163D54"/><TextBlock Text="GENESIS · unabhängiger Hintergrundkern · funktionaler SPIKE-Prototyp" Foreground="#496A7C" FontSize="13"/></StackPanel>
+    <StackPanel Grid.Row="1" Orientation="Horizontal" Margin="0,0,0,14"><Button x:Name="StartJob" Content="10-Schritte-Test starten" Click="StartJob_Click" Padding="15,9" Margin="0,0,10,0"/><Button Content="Aktualisieren" Click="Refresh_Click" Padding="15,9"/><TextBlock x:Name="ConnectionText" Margin="14,10,0,0" Foreground="#245C68"/></StackPanel>
+    <Grid Grid.Row="2"><Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
+      <GroupBox Header="Dauerhafte Beschlüsse" Margin="0,0,9,0" Padding="10"><ListBox x:Name="DecisionsList" BorderThickness="0" Background="Transparent" TextBlock.TextWrapping="Wrap"/></GroupBox>
+      <GroupBox Grid.Column="1" Header="Persistente Aufträge" Margin="9,0,0,0" Padding="10"><ListBox x:Name="JobsList" BorderThickness="0" Background="Transparent"/></GroupBox>
+    </Grid>
+    <Grid Grid.Row="3" Margin="0,16,0,0"><Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions><TextBox x:Name="DecisionInput" VerticalContentAlignment="Center" Padding="10" MinHeight="39" ToolTip="Beschluss eingeben – keine KI-Erkennung in dieser SPIKE-Version"/><Button Grid.Column="1" Content="Beschluss speichern" Click="Remember_Click" Padding="14,9" Margin="10,0,0,0"/></Grid>
+  </Grid>
+</Window>
