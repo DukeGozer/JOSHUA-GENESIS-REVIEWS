@@ -1,0 +1,420 @@
+
+========== BEGIN FILE: .gitignore ==========
+GIT-BLOB-SHA: 794dff0b3cf92a8c0c3f37b492498fa9fc085cdb
+# .NET build output
+**/bin/
+**/obj/
+dist/
+artifacts/
+.vs/
+*.user
+*.suo
+
+# Runtime and private content
+state.json
+state.json.*
+host.log
+*.log
+.env
+.env.*
+*.pfx
+*.key
+*.pem
+secrets.*
+F_JOSHUA_DATA/
+THE_HIVE/
+models/
+datasets/
+
+========== END FILE: .gitignore ==========
+
+
+========== BEGIN FILE: .github/workflows/windows-build.yml ==========
+GIT-BLOB-SHA: c57f30d24ac7df12000f429616e1b7d210708461
+name: Windows build
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  windows-build:
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Install .NET 8 SDK
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '8.0.x'
+      - name: Build Genesis UI
+        if: hashFiles('src/Genesis.UI/Genesis.UI.csproj') != ''
+        shell: pwsh
+        run: dotnet build src/Genesis.UI/Genesis.UI.csproj --configuration Release --nologo
+      - name: Build Genesis Host
+        if: hashFiles('src/Genesis.Host/Genesis.Host.csproj') != ''
+        shell: pwsh
+        run: dotnet build src/Genesis.Host/Genesis.Host.csproj --configuration Release --nologo
+      - name: Protocol roundtrip smoke test
+        shell: pwsh
+        run: dotnet run --project tests/Genesis.ProtocolSmoke/Genesis.ProtocolSmoke.csproj --configuration Release --no-launch-profile
+      - name: Package layout verification
+        shell: pwsh
+        run: pwsh -NoProfile -File scripts/build-release.ps1
+      - name: End-to-end Windows host integration
+        shell: pwsh
+        run: dotnet run --project tests/Genesis.IntegrationSmoke/Genesis.IntegrationSmoke.csproj --configuration Release --no-launch-profile -- "dist/JoshuaSpike5Genesis-win-x64/Host/Genesis.Host.exe"
+      - name: Upload Windows build artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: GENESIS-0.1.1-win-x64-UNREVIEWED
+          path: dist/JoshuaSpike5Genesis-win-x64/
+          retention-days: 7
+          if-no-files-found: error
+
+========== END FILE: .github/workflows/windows-build.yml ==========
+
+
+========== BEGIN FILE: src/Genesis.Contracts/Genesis.Contracts.csproj ==========
+GIT-BLOB-SHA: f85fd534655adc6cb821531d7b82622095fc65ee
+<Project Sdk="Microsoft.NET.Sdk"><PropertyGroup><Version>0.1.1</Version><AssemblyVersion>0.1.1.0</AssemblyVersion><FileVersion>0.1.1.0</FileVersion><InformationalVersion>0.1.1-review-candidate</InformationalVersion><TargetFramework>net8.0</TargetFramework><Nullable>enable</Nullable><ImplicitUsings>enable</ImplicitUsings></PropertyGroup></Project>
+========== END FILE: src/Genesis.Contracts/Genesis.Contracts.csproj ==========
+
+
+========== BEGIN FILE: src/Genesis.Contracts/Protocol.cs ==========
+GIT-BLOB-SHA: b785b309bccbc119c5cbe3118071022fefbe648f
+using System.Text.Json;
+
+namespace Genesis.Contracts;
+
+public static class Protocol
+{
+    public const string PipeName = "joshua-spike-5-genesis-v1";
+    public static string ActivePipeName => Environment.GetEnvironmentVariable("GENESIS_PIPE_NAME") ?? PipeName;
+    public static readonly JsonSerializerOptions Json = new(JsonSerializerDefaults.Web) { WriteIndented = true };
+    public static readonly JsonSerializerOptions WireJson = new(JsonSerializerDefaults.Web) { WriteIndented = false };
+}
+
+public sealed record Request(string Command, string? Text = null, string? Id = null);
+public sealed record Response(bool Success, string Message, Snapshot? Data = null);
+public sealed record Decision(string Id, string Text, DateTimeOffset CreatedAt);
+public sealed record Job(string Id, string Title, string State, int Completed, int Total, DateTimeOffset CreatedAt, string? Error = null);
+public sealed class Snapshot
+{
+    public int SchemaVersion { get; set; } = 1;
+    public List<Decision> Decisions { get; set; } = [];
+    public List<Job> Jobs { get; set; } = [];
+    public DateTimeOffset UpdatedAt { get; set; } = DateTimeOffset.UtcNow;
+}
+========== END FILE: src/Genesis.Contracts/Protocol.cs ==========
+
+
+========== BEGIN FILE: src/Genesis.Host/Genesis.Host.csproj ==========
+GIT-BLOB-SHA: d319495a275e016a0d9729535143bd4acef0af9b
+<Project Sdk="Microsoft.NET.Sdk"><PropertyGroup><Version>0.1.1</Version><AssemblyVersion>0.1.1.0</AssemblyVersion><FileVersion>0.1.1.0</FileVersion><InformationalVersion>0.1.1-review-candidate</InformationalVersion><OutputType>WinExe</OutputType><TargetFramework>net8.0</TargetFramework><Nullable>enable</Nullable><ImplicitUsings>enable</ImplicitUsings></PropertyGroup><ItemGroup><ProjectReference Include="../Genesis.Contracts/Genesis.Contracts.csproj" /></ItemGroup></Project>
+========== END FILE: src/Genesis.Host/Genesis.Host.csproj ==========
+
+
+========== BEGIN FILE: src/Genesis.Host/Program.cs ==========
+GIT-BLOB-SHA: a21fdc919dd63004a7dfc4732a0ca9c5290f0027
+using System.IO.Pipes;
+using System.Text;
+using System.Text.Json;
+using Genesis.Contracts;
+
+namespace Genesis.Host;
+
+internal static class Program
+{
+    private static readonly object StateGate = new();
+    private static readonly object LogGate = new();
+    private static readonly CancellationTokenSource StopSignal = new();
+    private static readonly string DataDirectory = Environment.GetEnvironmentVariable("GENESIS_DATA_DIR")
+        ?? Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "JoshuaSpike5Genesis");
+    private static readonly string StatePath = Path.Combine(DataDirectory, "state.json");
+    private static readonly string BackupPath = StatePath + ".bak";
+    private static readonly string LogPath = Path.Combine(DataDirectory, "host.log");
+    private static Snapshot _state = new();
+    private static string _startupNotice = "GENESIS Host erreichbar";
+    private const int MaxRequestChars = 64 * 1024;
+
+    private static async Task<int> Main()
+    {
+        Directory.CreateDirectory(DataDirectory);
+        try
+        {
+            using var singleton = new FileStream(Path.Combine(DataDirectory, "host.lock"),
+                FileMode.OpenOrCreate, FileAccess.ReadWrite, FileShare.None);
+            Load();
+            Log("GENESIS 0.1.1 Host started.");
+            var worker = Task.Run(() => WorkLoop(StopSignal.Token));
+            try
+            {
+                while (!StopSignal.IsCancellationRequested)
+                {
+                    using var server = new NamedPipeServerStream(Protocol.ActivePipeName,
+                        PipeDirection.InOut, NamedPipeServerStream.MaxAllowedServerInstances,
+                        PipeTransmissionMode.Byte, PipeOptions.Asynchronous | PipeOptions.CurrentUserOnly);
+                    try
+                    {
+                        await server.WaitForConnectionAsync(StopSignal.Token);
+                        // Ownership of each connected pipe transfers to its request task.
+                        var client = server;
+                        await HandleClient(client, StopSignal.Token);
+                    }
+                    catch (OperationCanceledException) when (StopSignal.IsCancellationRequested) { break; }
+                    catch (Exception ex)
+                    {
+                        Log("Pipe accept/handle error: " + ex);
+                        if (!StopSignal.IsCancellationRequested) await Task.Delay(200);
+                    }
+                }
+            }
+            finally
+            {
+                StopSignal.Cancel();
+                try { await worker; } catch (OperationCanceledException) { }
+                Log("GENESIS host stopped.");
+            }
+            return 0;
+        }
+        catch (IOException ex) { Log("Host lock unavailable (possibly already running): " + ex.Message); return 2; }
+        catch (Exception ex) { Log("Host startup failed: " + ex); return 1; }
+    }
+
+    private static async Task HandleClient(NamedPipeServerStream pipe, CancellationToken stopping)
+    {
+        // Handle one request per connection; every read has a deadline and size bound.
+        using var reader = new StreamReader(pipe, Encoding.UTF8, detectEncodingFromByteOrderMarks: false, leaveOpen: true);
+        using var writer = new StreamWriter(pipe, new UTF8Encoding(false), leaveOpen: true) { AutoFlush = true };
+        try
+        {
+            using var timeout = CancellationTokenSource.CreateLinkedTokenSource(stopping);
+            timeout.CancelAfter(TimeSpan.FromSeconds(10));
+            var line = await PipeLineCodec.ReadBoundedAsync(reader, MaxRequestChars, timeout.Token);
+            if (line is null) return;
+            Request? request;
+            try { request = JsonSerializer.Deserialize<Request>(line, Protocol.WireJson); }
+            catch (JsonException)
+            {
+                await writer.WriteLineAsync(JsonSerializer.Serialize(
+                    new Response(false, "Ungültiges JSON."), Protocol.WireJson));
+                return;
+            }
+
+            Response response;
+            lock (StateGate)
+            {
+                try { response = Execute(request); }
+                catch (IOException ex) { Log("Persistence I/O error: " + ex); response = new(false, "Speichern fehlgeschlagen. Keine Änderung bestätigt."); }
+                catch (UnauthorizedAccessException ex) { Log("Persistence permission error: " + ex); response = new(false, "Speichern nicht erlaubt."); }
+            }
+            await writer.WriteLineAsync(JsonSerializer.Serialize(response, Protocol.WireJson));
+            if (request?.Command?.Equals("stop", StringComparison.OrdinalIgnoreCase) == true && response.Success)
+                StopSignal.Cancel();
+        }
+        catch (OperationCanceledException) when (!stopping.IsCancellationRequested)
+        {
+            await TryReplyAsync(writer, new(false, "Zeitüberschreitung beim Lesen."));
+        }
+        catch (InvalidDataException) { await TryReplyAsync(writer, new(false, "Anfrage zu groß.")); }
+        catch (OperationCanceledException) when (stopping.IsCancellationRequested) { }
+        catch (Exception ex) { Log("Client error: " + ex); await TryReplyAsync(writer, new(false, "Anfrage fehlgeschlagen.")); }
+    }
+
+    private static async Task TryReplyAsync(StreamWriter writer, Response response)
+    {
+        try { await writer.WriteLineAsync(JsonSerializer.Serialize(response, Protocol.WireJson)); }
+        catch (IOException) { }
+        catch (ObjectDisposedException) { }
+    }
+
+    private static Response Execute(Request? request)
+    {
+        if (string.IsNullOrWhiteSpace(request?.Command)) return new(false, "Befehl fehlt.");
+        switch (request.Command.Trim().ToLowerInvariant())
+        {
+            case "status": return new(true, _startupNotice, Clone());
+            case "remember":
+                if (string.IsNullOrWhiteSpace(request.Text)) return new(false, "Bitte Beschlusstext angeben.");
+                if (request.Text.Length > 2000) return new(false, "Beschlusstext zu lang (max. 2000 Zeichen).");
+                var decided = Clone();
+                decided.Decisions.Add(new Decision(Guid.NewGuid().ToString("N"), request.Text.Trim(), DateTimeOffset.UtcNow));
+                Save(decided);
+                return new(true, "Beschluss gespeichert.", Clone());
+            case "start-demo":
+                var started = Clone();
+                started.Jobs.Add(new Job(Guid.NewGuid().ToString("N"), "SPIKE-Testauftrag: 10 Schritte",
+                    "queued", 0, 10, DateTimeOffset.UtcNow));
+                Save(started);
+                return new(true, "Testauftrag gestartet.", Clone());
+            case "cancel":
+                if (string.IsNullOrWhiteSpace(request.Id)) return new(false, "Auftrags-ID fehlt.");
+                var index = _state.Jobs.FindIndex(x => x.Id == request.Id);
+                if (index < 0) return new(false, "Auftrag nicht gefunden.");
+                if (_state.Jobs[index].State is "done" or "canceled") return new(false, "Auftrag bereits beendet.");
+                var cancelled = Clone();
+                cancelled.Jobs[index] = cancelled.Jobs[index] with { State = "canceled" };
+                Save(cancelled);
+                return new(true, "Auftrag abgebrochen.", Clone());
+            case "stop": return new(true, "Host wird kontrolliert beendet.");
+            default: return new(false, "Unbekannter Befehl.");
+        }
+    }
+
+    private static async Task WorkLoop(CancellationToken stopping)
+    {
+        while (!stopping.IsCancellationRequested)
+        {
+            try
+            {
+                await Task.Delay(TimeSpan.FromSeconds(1), stopping);
+                lock (StateGate)
+                {
+                    var index = _state.Jobs.FindIndex(x => x.State is "queued" or "running");
+                    if (index >= 0)
+                    {
+                        var next = Clone();
+                        var job = next.Jobs[index];
+                        var completed = Math.Min(job.Total, job.Completed + 1);
+                        next.Jobs[index] = job with
+                        {
+                            State = completed == job.Total ? "done" : "running",
+                            Completed = completed
+                        };
+                        Save(next);
+                    }
+                }
+            }
+            catch (OperationCanceledException) when (stopping.IsCancellationRequested) { break; }
+            catch (Exception ex)
+            {
+                Log("Background job paused after error: " + ex);
+                try { await Task.Delay(TimeSpan.FromSeconds(5), stopping); }
+                catch (OperationCanceledException) { break; }
+            }
+        }
+    }
+
+    private static Snapshot Clone() => new()
+    {
+        SchemaVersion = _state.SchemaVersion,
+        Decisions = [.. _state.Decisions],
+        Jobs = [.. _state.Jobs],
+        UpdatedAt = _state.UpdatedAt
+    };
+
+    private static Snapshot ReadSnapshot(string path)
+    {
+        var result = JsonSerializer.Deserialize<Snapshot>(File.ReadAllText(path), Protocol.Json)
+            ?? throw new InvalidDataException("Snapshot is empty.");
+        if (result.SchemaVersion != 1) throw new InvalidDataException("Unknown state schema " + result.SchemaVersion);
+        if (result.Decisions is null || result.Jobs is null) throw new InvalidDataException("Missing state collections.");
+        return result;
+    }
+
+    private static void Load()
+    {
+        if (!File.Exists(StatePath))
+        {
+            if (File.Exists(BackupPath))
+            {
+                // Refuse silent loss of a previously saved snapshot.
+                _state = ReadSnapshot(BackupPath);
+                File.Copy(BackupPath, StatePath);
+                _startupNotice = "Zustand aus Backup wiederhergestellt (Hauptdatei fehlte).";
+            }
+            return;
+        }
+        try { _state = ReadSnapshot(StatePath); }
+        catch (Exception ex) when (ex is IOException or JsonException or InvalidDataException)
+        {
+            Log("Primary state invalid: " + ex);
+            if (!File.Exists(BackupPath)) throw new InvalidDataException("No backup; original preserved.", ex);
+            var backup = ReadSnapshot(BackupPath); // verify backup before touching primary
+            var quarantined = StatePath + ".corrupt-" + DateTimeOffset.UtcNow.ToString("yyyyMMddHHmmssfff");
+            File.Move(StatePath, quarantined);
+            File.Copy(BackupPath, StatePath);
+            _state = backup;
+            _startupNotice = "Beschädigter Zustand gesichert; Backup wiederhergestellt.";
+            Log(_startupNotice + " " + quarantined);
+        }
+    }
+
+    // Commit to disk before making the new state visible in memory.
+    private static void Save(Snapshot candidate)
+    {
+        candidate.UpdatedAt = DateTimeOffset.UtcNow;
+        var temp = StatePath + ".tmp";
+        using (var stream = new FileStream(temp, FileMode.Create, FileAccess.Write, FileShare.None))
+        {
+            var bytes = Encoding.UTF8.GetBytes(JsonSerializer.Serialize(candidate, Protocol.Json));
+            stream.Write(bytes);
+            stream.Flush(flushToDisk: true);
+        }
+        if (File.Exists(StatePath))
+            File.Replace(temp, StatePath, BackupPath);
+        else
+            File.Move(temp, StatePath);
+        _state = candidate;
+    }
+
+    private static void Log(string message)
+    {
+        try { lock (LogGate) File.AppendAllText(LogPath, $"{DateTimeOffset.UtcNow:u} {message}{Environment.NewLine}"); }
+        catch { /* Logging must never terminate the host. */ }
+    }
+}
+
+========== END FILE: src/Genesis.Host/Program.cs ==========
+
+
+========== BEGIN FILE: src/Genesis.Host/PipeLineCodec.cs ==========
+GIT-BLOB-SHA: c640d5b60140e8b619a2b1c07816d74f6c0f1bd7
+using System.IO;
+
+namespace Genesis.Host;
+
+public static class PipeLineCodec
+{
+    // A char-by-char reader bounds memory even if a client never sends a newline.
+    public static async Task<string?> ReadBoundedAsync(StreamReader reader, int limit, CancellationToken ct)
+    {
+        if (limit < 1) throw new ArgumentOutOfRangeException(nameof(limit));
+        var line = new System.Text.StringBuilder();
+        var chars = new char[1];
+        while (true)
+        {
+            var read = await reader.ReadAsync(chars.AsMemory(), ct);
+            if (read == 0) return line.Length == 0 ? null : throw new InvalidDataException("Incomplete request.");
+            if (chars[0] == '\n') return line.ToString().TrimEnd('\r');
+            if (line.Length >= limit) throw new InvalidDataException("Request exceeds max length.");
+            line.Append(chars[0]);
+        }
+    }
+}
+
+========== END FILE: src/Genesis.Host/PipeLineCodec.cs ==========
+
+
+========== BEGIN FILE: scripts/build-release.ps1 ==========
+GIT-BLOB-SHA: 57d34e40c3e355fcbad5d8906065ea929ada23c2
+$ErrorActionPreference = 'Stop'
+$root = Split-Path $PSScriptRoot -Parent
+$out = Join-Path $root 'dist\JoshuaSpike5Genesis-win-x64'
+$hostOut = Join-Path $out 'Host'
+$uiOut = Join-Path $out 'UI'
+if (-not (Get-Command dotnet -ErrorAction SilentlyContinue)) { throw '.NET SDK ist nicht installiert.' }
+New-Item -ItemType Directory -Force $hostOut, $uiOut | Out-Null
+dotnet publish (Join-Path $root 'src\Genesis.Host\Genesis.Host.csproj') -c Release -r win-x64 --self-contained false -o $hostOut
+if ($LASTEXITCODE -ne 0) { throw 'Host-Build fehlgeschlagen.' }
+dotnet publish (Join-Path $root 'src\Genesis.UI\Genesis.UI.csproj') -c Release -r win-x64 --self-contained false -o $uiOut
+if ($LASTEXITCODE -ne 0) { throw 'UI-Build fehlgeschlagen.' }
+foreach ($file in @((Join-Path $hostOut 'Genesis.Host.exe'), (Join-Path $uiOut 'Genesis.UI.exe'), (Join-Path $hostOut 'Genesis.Contracts.dll'))) {
+    if (-not (Test-Path $file)) { throw "Build unvollständig: $file" }
+}
+Write-Host "Build fertig: $out"
+Write-Host "Start: $uiOut\Genesis.UI.exe"
+
+========== END FILE: scripts/build-release.ps1 ==========
