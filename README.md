@@ -1,6 +1,13 @@
 # JOSHUA GENESIS – öffentliche Expertenprüfung
 
-## Neu: korrigierter Reviewstand 0.3.0-R1
+## Neueste Expertenprüfung: GENESIS 0.3.1 Alpha-Kandidat
+
+- [**Komplettes Quellcodepaket (25 Dateien, eine TXT)**](REVIEW_BUNDLE_0.3.1_ALPHA.txt)
+- [**Neuer Prüfauftrag für Gemini und Meta**](REVIEW_0.3.1_ALPHA.md)
+
+Prüfstand `0857242bcc40e6e8354c841b556fed59ef629288`, Windows CI **43764447303: success**. Enthält Chat-Hintergrundaufträge, SQLite-V2-Gesprächsverlauf, GPU-Exklusivität, Streaming, Abbruch und Root-GUI-Starter. **Noch keine reale Ollama/Qwen- oder interaktive Windows-Abnahme.**
+
+## Vorheriger Reviewstand 0.3.0-R1
 
 - [**Vollständiger Quellcode (22 Dateien, ein TXT)**](REVIEW_BUNDLE_0.3.0_R1.txt)
 - [**Prüfauftrag nach Eigenprüfung**](REVIEW_0.3.0_R1.md)
