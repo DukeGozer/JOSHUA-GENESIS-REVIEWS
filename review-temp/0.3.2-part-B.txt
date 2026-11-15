@@ -1,0 +1,1643 @@
+========== BEGIN FILE: src/Genesis.Storage/Genesis.Storage.csproj ==========
+GIT-BLOB-SHA: fbcfce4241af5399de03b1561f1f2969ab4b9c2e
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup><Version>0.3.2</Version><AssemblyVersion>0.3.2.0</AssemblyVersion><FileVersion>0.3.2.0</FileVersion><InformationalVersion>0.3.2-alpha-candidate</InformationalVersion><TargetFramework>net8.0</TargetFramework><Nullable>enable</Nullable><ImplicitUsings>enable</ImplicitUsings></PropertyGroup>
+  <ItemGroup>
+    <PackageReference Include="Microsoft.Data.Sqlite" Version="8.0.11" />
+    <ProjectReference Include="../Genesis.Contracts/Genesis.Contracts.csproj" />
+  </ItemGroup>
+</Project>
+========== END FILE: src/Genesis.Storage/Genesis.Storage.csproj ==========
+
+========== BEGIN FILE: src/Genesis.Storage/SnapshotStore.cs ==========
+GIT-BLOB-SHA: 10aa95a00bcebabc3a1cdb5e7676d4a6c3e89fa6
+using System.Globalization;
+using Genesis.Contracts;
+using Microsoft.Data.Sqlite;
+
+namespace Genesis.Storage;
+
+public sealed class SnapshotStore : IDisposable
+{
+    private readonly SqliteConnection _connection;
+    private readonly object _dbLock = new();
+    private const int Schema = 2;
+    private const int MaxRecentCompletedJobs = 500;
+    private readonly string _path;
+
+    public SnapshotStore(string dataDirectory)
+    {
+        Directory.CreateDirectory(dataDirectory);
+        _path = Path.Combine(dataDirectory, "genesis.db");
+        _connection = new SqliteConnection(new SqliteConnectionStringBuilder
+        {
+            DataSource = _path, Mode = SqliteOpenMode.ReadWriteCreate,
+            Cache = SqliteCacheMode.Private, Pooling = false
+        }.ToString());
+        try
+        {
+            _connection.Open();
+            Exec("PRAGMA journal_mode=WAL;");
+            Exec("PRAGMA busy_timeout=5000;");
+            Exec("PRAGMA synchronous=FULL;");
+            Exec("CREATE TABLE IF NOT EXISTS metadata (key TEXT PRIMARY KEY, value TEXT NOT NULL);");
+            Exec("CREATE TABLE IF NOT EXISTS decisions (id TEXT PRIMARY KEY, text TEXT NOT NULL, created_at TEXT NOT NULL);");
+            Exec("CREATE TABLE IF NOT EXISTS jobs (id TEXT PRIMARY KEY, title TEXT NOT NULL, state TEXT NOT NULL, completed INTEGER NOT NULL, total INTEGER NOT NULL, created_at TEXT NOT NULL, error TEXT);");
+
+            var version = GetMeta("schema_version");
+            var initialized = GetMeta("initialized") == "1";
+            if (initialized && version is null)
+                throw new InvalidDataException("Initialized SQLite database is missing schema_version.");
+            if (version is not null && version != "1" && version != "2")
+                throw new InvalidDataException("Unsupported SQLite schema " + version);
+
+            // Idempotent v1 -> v2 migration. This also repairs a fresh database if
+            // the process stopped after DDL but before the first data Commit.
+            using (var tx = _connection.BeginTransaction())
+            {
+                EnsureColumn("jobs", "kind", "TEXT NOT NULL DEFAULT 'demo'", tx);
+                EnsureColumn("jobs", "model", "TEXT", tx);
+                EnsureColumn("jobs", "prompt", "TEXT", tx);
+                EnsureColumn("jobs", "result", "TEXT", tx);
+                SetMeta("schema_version", Schema.ToString(CultureInfo.InvariantCulture), tx);
+                tx.Commit();
+            }
+
+            Exec(@"CREATE TABLE IF NOT EXISTS chat_messages (
+                id TEXT PRIMARY KEY, session TEXT NOT NULL, role TEXT NOT NULL,
+                text TEXT NOT NULL, model TEXT, created_at TEXT NOT NULL);");
+            Exec("CREATE INDEX IF NOT EXISTS chat_messages_session_idx ON chat_messages (session, created_at);");
+            Exec("CREATE INDEX IF NOT EXISTS jobs_state_created_at_idx ON jobs (state, created_at DESC, id DESC);");
+        }
+        catch
+        {
+            _connection.Dispose();
+            throw;
+        }
+    }
+
+    private void Exec(string sql)
+    {
+        using var c = _connection.CreateCommand();
+        c.CommandText = sql;
+        c.ExecuteNonQuery();
+    }
+
+    private string? GetMeta(string key)
+    {
+        using var c = _connection.CreateCommand();
+        c.CommandText = "SELECT value FROM metadata WHERE key=$key";
+        c.Parameters.AddWithValue("$key", key);
+        return c.ExecuteScalar() as string;
+    }
+
+    private void SetMeta(string key, string value, SqliteTransaction tx)
+    {
+        using var c = _connection.CreateCommand();
+        c.Transaction = tx;
+        c.CommandText = @"INSERT INTO metadata(key,value) VALUES ($key,$value)
+            ON CONFLICT(key) DO UPDATE SET value=excluded.value";
+        c.Parameters.AddWithValue("$key", key);
+        c.Parameters.AddWithValue("$value", value);
+        c.ExecuteNonQuery();
+    }
+
+    private void EnsureColumn(string table, string name, string definition, SqliteTransaction tx)
+    {
+        var exists = false;
+        using (var info = _connection.CreateCommand())
+        {
+            info.Transaction = tx;
+            info.CommandText = "PRAGMA table_info(" + table + ");";
+            using var reader = info.ExecuteReader();
+            while (reader.Read())
+                if (string.Equals(reader.GetString(1), name, StringComparison.OrdinalIgnoreCase))
+                    exists = true;
+        }
+        if (exists) return;
+        using var alter = _connection.CreateCommand();
+        alter.Transaction = tx;
+        alter.CommandText = "ALTER TABLE " + table + " ADD COLUMN " + name + " " + definition;
+        alter.ExecuteNonQuery();
+    }
+
+    private static DateTimeOffset Date(string? value, string field, string id)
+    {
+        if (!DateTimeOffset.TryParseExact(value, "O", CultureInfo.InvariantCulture,
+            DateTimeStyles.RoundtripKind, out var result))
+            throw new InvalidDataException($"Ungültiger SQLite-Zeitwert {field} bei {id}.");
+        return result;
+    }
+
+    private static string DateText(DateTimeOffset value) => value.ToString("O", CultureInfo.InvariantCulture);
+
+    public Snapshot? Read()
+    {
+        lock (_dbLock)
+        {
+            if (GetMeta("initialized") != "1") return null;
+            if (GetMeta("schema_version") != Schema.ToString(CultureInfo.InvariantCulture))
+                throw new InvalidDataException("Initialized SQLite database has missing or unsupported schema.");
+            var s = new Snapshot { SchemaVersion = Schema };
+            var updated = GetMeta("updated_at")
+                ?? throw new InvalidDataException("SQLite updated_at metadata missing.");
+            s.UpdatedAt = Date(updated, "updated_at", "metadata");
+            using (var c = _connection.CreateCommand())
+            {
+                c.CommandText = "SELECT id,text,created_at FROM decisions ORDER BY created_at,id";
+                using var r = c.ExecuteReader();
+                while (r.Read())
+                {
+                    var id = r.GetString(0);
+                    var t = r.GetString(1);
+                    if (string.IsNullOrWhiteSpace(id) || string.IsNullOrWhiteSpace(t))
+                        throw new InvalidDataException("Ungültiger Beschluss " + id);
+                    s.Decisions.Add(new Decision(id, t, Date(r.GetString(2), "created_at", id)));
+                }
+            }
+            using (var c = _connection.CreateCommand())
+            {
+                c.CommandText = @"SELECT id,title,state,completed,total,created_at,error,kind,model,prompt,result FROM jobs
+                    WHERE state IN ('queued','running','canceling') OR id IN (
+                        SELECT id FROM jobs WHERE state NOT IN ('queued','running','canceling')
+                        ORDER BY created_at DESC,id DESC LIMIT $recentLimit)
+                    ORDER BY created_at,id";
+                c.Parameters.AddWithValue("$recentLimit", MaxRecentCompletedJobs);
+                using var r = c.ExecuteReader();
+                while (r.Read())
+                {
+                    var id = r.GetString(0);
+                    var completed = r.GetInt32(3);
+                    var total = r.GetInt32(4);
+                    if (string.IsNullOrWhiteSpace(id) || total < 1 || completed < 0 || completed > total)
+                        throw new InvalidDataException("Ungültige Auftragsdaten " + id);
+                    s.Jobs.Add(new Job(id, r.GetString(1), r.GetString(2), completed, total,
+                        Date(r.GetString(5), "created_at", id),
+                        r.IsDBNull(6) ? null : r.GetString(6),
+                        r.GetString(7), r.IsDBNull(8) ? null : r.GetString(8),
+                        r.IsDBNull(9) ? null : r.GetString(9), r.IsDBNull(10) ? null : r.GetString(10)));
+                }
+            }
+            using (var c = _connection.CreateCommand())
+            {
+                c.CommandText = @"SELECT id,session,role,text,model,created_at FROM
+                   (SELECT * FROM chat_messages WHERE session='main' ORDER BY created_at DESC,id DESC LIMIT 80)
+                   ORDER BY created_at,id";
+                using var r = c.ExecuteReader();
+                while (r.Read())
+                {
+                    var id = r.GetString(0);
+                    var role = r.GetString(2);
+                    if (role is not ("user" or "assistant") || string.IsNullOrWhiteSpace(id))
+                        throw new InvalidDataException("Ungültige Chat-Nachricht " + id);
+                    s.ChatMessages.Add(new ChatMessage(id, r.GetString(1), role, r.GetString(3),
+                        r.IsDBNull(4) ? null : r.GetString(4), Date(r.GetString(5), "created_at", id)));
+                }
+            }
+            return s;
+        }
+    }
+
+    public void Commit(Snapshot candidate)
+    {
+        lock (_dbLock)
+        {
+            if (candidate.SchemaVersion != Schema) throw new InvalidDataException("Unsupported Snapshot contract version.");
+            using var tx = _connection.BeginTransaction();
+            // No full-table delete: preserve historical rows and use targeted UPSERTs.
+            foreach (var d in candidate.Decisions)
+            {
+                using var c = _connection.CreateCommand();
+                c.Transaction = tx;
+                c.CommandText = @"INSERT INTO decisions(id,text,created_at) VALUES ($id,$text,$date)
+                    ON CONFLICT(id) DO UPDATE SET text=excluded.text";
+                c.Parameters.AddWithValue("$id", d.Id);
+                c.Parameters.AddWithValue("$text", d.Text);
+                c.Parameters.AddWithValue("$date", DateText(d.CreatedAt));
+                c.ExecuteNonQuery();
+            }
+            foreach (var j in candidate.Jobs) UpsertJob(j, tx);
+            SetMeta("schema_version", Schema.ToString(CultureInfo.InvariantCulture), tx);
+            SetMeta("updated_at", DateText(candidate.UpdatedAt), tx);
+            SetMeta("initialized", "1", tx);
+            tx.Commit();
+        }
+    }
+
+    // Chat request and its user turn are one transaction: a DB failure cannot
+    // leave an un-runnable queued job or an unmatched user message.
+    public void CreateChatRequest(Job job, ChatMessage userMessage)
+    {
+        lock (_dbLock)
+        {
+            using var tx = _connection.BeginTransaction();
+            UpsertJob(job, tx);
+            InsertChatMessage(userMessage, tx);
+            SetMeta("updated_at", DateText(userMessage.CreatedAt), tx);
+            SetMeta("schema_version", Schema.ToString(CultureInfo.InvariantCulture), tx);
+            SetMeta("initialized", "1", tx);
+            tx.Commit();
+        }
+    }
+
+    // Streaming writes touch only the active job row, not every decision/job row.
+    public void UpdateJobProgress(string id, string state, int completed, int total,
+        string? result, string? error, DateTimeOffset updatedAt)
+    {
+        lock (_dbLock)
+        {
+            using var tx = _connection.BeginTransaction();
+            using var c = _connection.CreateCommand();
+            c.Transaction = tx;
+            c.CommandText = @"UPDATE jobs SET state=$state,completed=$completed,total=$total,
+                result=$result,error=$error WHERE id=$id";
+            c.Parameters.AddWithValue("$id", id);
+            c.Parameters.AddWithValue("$state", state);
+            c.Parameters.AddWithValue("$completed", completed);
+            c.Parameters.AddWithValue("$total", total);
+            c.Parameters.AddWithValue("$result", (object?)result ?? DBNull.Value);
+            c.Parameters.AddWithValue("$error", (object?)error ?? DBNull.Value);
+            if (c.ExecuteNonQuery() != 1) throw new InvalidDataException("Chat-Auftrag nicht gefunden: " + id);
+            SetMeta("updated_at", DateText(updatedAt), tx);
+            tx.Commit();
+        }
+    }
+
+    // Final job state and the assistant completion/error/cancel marker commit together.
+    public void FinishChat(string id, string state, string? result, string? error,
+        ChatMessage assistantMessage, DateTimeOffset updatedAt)
+    {
+        lock (_dbLock)
+        {
+            using var tx = _connection.BeginTransaction();
+            using (var c = _connection.CreateCommand())
+            {
+                c.Transaction = tx;
+                c.CommandText = @"UPDATE jobs SET state=$state,completed=$completed,result=$result,error=$error WHERE id=$id";
+                c.Parameters.AddWithValue("$id", id);
+                c.Parameters.AddWithValue("$state", state);
+                c.Parameters.AddWithValue("$completed", state == "done" ? 1 : 0);
+                c.Parameters.AddWithValue("$result", (object?)result ?? DBNull.Value);
+                c.Parameters.AddWithValue("$error", (object?)error ?? DBNull.Value);
+                if (c.ExecuteNonQuery() != 1) throw new InvalidDataException("Chat-Auftrag nicht gefunden: " + id);
+            }
+            InsertChatMessage(assistantMessage, tx);
+            SetMeta("updated_at", DateText(updatedAt), tx);
+            tx.Commit();
+        }
+    }
+
+    public void AppendChatMessage(ChatMessage message)
+    {
+        lock (_dbLock)
+        {
+            using var tx = _connection.BeginTransaction();
+            InsertChatMessage(message, tx);
+            SetMeta("updated_at", DateText(message.CreatedAt), tx);
+            tx.Commit();
+        }
+    }
+
+    private void InsertChatMessage(ChatMessage message, SqliteTransaction tx)
+    {
+        using var c = _connection.CreateCommand();
+        c.Transaction = tx;
+        c.CommandText = @"INSERT INTO chat_messages(id,session,role,text,model,created_at)
+            VALUES ($id,$session,$role,$text,$model,$date)";
+        c.Parameters.AddWithValue("$id", message.Id);
+        c.Parameters.AddWithValue("$session", message.Session);
+        c.Parameters.AddWithValue("$role", message.Role);
+        c.Parameters.AddWithValue("$text", message.Text);
+        c.Parameters.AddWithValue("$model", (object?)message.Model ?? DBNull.Value);
+        c.Parameters.AddWithValue("$date", DateText(message.CreatedAt));
+        c.ExecuteNonQuery();
+    }
+
+    private void UpsertJob(Job job, SqliteTransaction tx)
+    {
+        using var c = _connection.CreateCommand();
+        c.Transaction = tx;
+        c.CommandText = @"INSERT INTO jobs(id,title,state,completed,total,created_at,error,kind,model,prompt,result)
+            VALUES ($id,$title,$state,$completed,$total,$date,$error,$kind,$model,$prompt,$result)
+            ON CONFLICT(id) DO UPDATE SET state=excluded.state,completed=excluded.completed,
+               total=excluded.total,error=excluded.error,result=excluded.result";
+        c.Parameters.AddWithValue("$id", job.Id);
+        c.Parameters.AddWithValue("$title", job.Title);
+        c.Parameters.AddWithValue("$state", job.State);
+        c.Parameters.AddWithValue("$completed", job.Completed);
+        c.Parameters.AddWithValue("$total", job.Total);
+        c.Parameters.AddWithValue("$date", DateText(job.CreatedAt));
+        c.Parameters.AddWithValue("$error", (object?)job.Error ?? DBNull.Value);
+        c.Parameters.AddWithValue("$kind", job.Kind);
+        c.Parameters.AddWithValue("$model", (object?)job.Model ?? DBNull.Value);
+        c.Parameters.AddWithValue("$prompt", (object?)job.Prompt ?? DBNull.Value);
+        c.Parameters.AddWithValue("$result", (object?)job.Result ?? DBNull.Value);
+        c.ExecuteNonQuery();
+    }
+
+    public void Dispose() => _connection.Dispose();
+}
+
+========== END FILE: src/Genesis.Storage/SnapshotStore.cs ==========
+
+========== BEGIN FILE: src/Genesis.Ollama/Genesis.Ollama.csproj ==========
+GIT-BLOB-SHA: 12c94866daa1a29ec439e450ee3c093e16960628
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup><Version>0.3.2</Version><AssemblyVersion>0.3.2.0</AssemblyVersion><FileVersion>0.3.2.0</FileVersion><InformationalVersion>0.3.2-alpha-candidate</InformationalVersion><TargetFramework>net8.0</TargetFramework><Nullable>enable</Nullable><ImplicitUsings>enable</ImplicitUsings></PropertyGroup>
+</Project>
+========== END FILE: src/Genesis.Ollama/Genesis.Ollama.csproj ==========
+
+========== BEGIN FILE: src/Genesis.Ollama/OllamaClient.cs ==========
+GIT-BLOB-SHA: 77c4d49ab1b49f89686d0d18aeedeb0f4b1403e5
+using System.Net.Http.Json;
+using System.Text.Json;
+using System.Runtime.CompilerServices;
+using System.Text;
+
+namespace Genesis.Ollama;
+
+public sealed record ChatTurn(string Role, string Content);
+
+public sealed class OllamaClient : IDisposable
+{
+    private readonly HttpClient _http;
+    private readonly bool _ownsClient;
+    private const int MaxResponseBytes = 2 * 1024 * 1024;
+
+    public OllamaClient(HttpClient? http = null)
+    {
+        _ownsClient = http is null;
+        _http = http ?? new HttpClient
+        {
+            BaseAddress = new Uri("http://127.0.0.1:11434/"),
+            Timeout = TimeSpan.FromMinutes(3)
+        };
+    }
+
+    public async Task<string[]> ModelsAsync(CancellationToken cancellation = default)
+    {
+        using var response = await _http.GetAsync("api/tags", HttpCompletionOption.ResponseHeadersRead, cancellation);
+        response.EnsureSuccessStatusCode();
+        using var json = await ReadBoundedJsonAsync(response.Content, cancellation);
+        if (!json.RootElement.TryGetProperty("models", out var models) || models.ValueKind != JsonValueKind.Array)
+            return [];
+        return models.EnumerateArray().Where(x => x.TryGetProperty("name", out var name) && name.ValueKind == JsonValueKind.String)
+            .Select(x => x.GetProperty("name").GetString()!)
+            .Where(x => !string.IsNullOrWhiteSpace(x))
+            .ToArray();
+    }
+
+    public async Task<string> ChatAsync(string model, string userText, CancellationToken cancellation = default)
+    {
+        if (string.IsNullOrWhiteSpace(model) || model.Length > 160)
+            throw new ArgumentException("Modellname fehlt oder ist zu lang.", nameof(model));
+        if (string.IsNullOrWhiteSpace(userText) || userText.Length > 16000)
+            throw new ArgumentException("Nachricht muss 1 bis 16.000 Zeichen enthalten.", nameof(userText));
+        using var request = new HttpRequestMessage(HttpMethod.Post, "api/chat")
+        {
+            Content = JsonContent.Create(new
+            {
+                model,
+                stream = false,
+                messages = new[] { new { role = "user", content = userText } },
+                options = new { num_predict = 2048 }
+            })
+        };
+        using var response = await _http.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, cancellation);
+        response.EnsureSuccessStatusCode();
+        using var json = await ReadBoundedJsonAsync(response.Content, cancellation);
+        if (!json.RootElement.TryGetProperty("message", out var message) ||
+            !message.TryGetProperty("content", out var content) || content.ValueKind != JsonValueKind.String)
+            throw new InvalidDataException("Ungültige Modellantwort.");
+        return content.GetString() ?? "";
+    }
+
+    public async IAsyncEnumerable<string> ChatStreamAsync(
+        string model, IReadOnlyList<ChatTurn> messages,
+        [EnumeratorCancellation] CancellationToken cancellation = default)
+    {
+        if (string.IsNullOrWhiteSpace(model) || model.Length > 160)
+            throw new ArgumentException("Modellname fehlt oder ist zu lang.", nameof(model));
+        if (messages.Count == 0 || messages.Count > 40 ||
+            messages.Any(m => m.Role is not ("user" or "assistant" or "system")
+                || string.IsNullOrWhiteSpace(m.Content) || m.Content.Length > 16000))
+            throw new ArgumentException("Ungültiger Chat-Kontext.", nameof(messages));
+        using var request = new HttpRequestMessage(HttpMethod.Post, "api/chat")
+        {
+            Content = JsonContent.Create(new
+            {
+                model,
+                stream = true,
+                messages = messages.Select(m => new { role = m.Role, content = m.Content }).ToArray(),
+                options = new { num_predict = 2048 }
+            })
+        };
+        using var response = await _http.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, cancellation);
+        await CheckStatusAsync(response, cancellation);
+        await using var stream = await response.Content.ReadAsStreamAsync(cancellation);
+        using var reader = new StreamReader(stream, Encoding.UTF8, detectEncodingFromByteOrderMarks: false, leaveOpen: true);
+        var total = 0;
+        var done = false;
+        while (!done)
+        {
+            var line = await ReadBoundedLineAsync(reader, 64 * 1024, cancellation);
+            if (line is null) throw new InvalidDataException("Ollama stream ended without done=true.");
+            if (string.IsNullOrWhiteSpace(line)) continue;
+            using var json = JsonDocument.Parse(line);
+            var root = json.RootElement;
+            if (root.TryGetProperty("error", out var error))
+                throw new InvalidDataException("Ollama: " + (error.GetString() ?? "Fehler"));
+            if (root.TryGetProperty("message", out var message) &&
+                message.TryGetProperty("content", out var content) &&
+                content.ValueKind == JsonValueKind.String)
+            {
+                var chunk = content.GetString() ?? "";
+                total += chunk.Length;
+                if (total > 250000)
+                    throw new InvalidDataException("Ollama output exceeded 250000 characters.");
+                if (chunk.Length > 0) yield return chunk;
+            }
+            if (root.TryGetProperty("done", out var complete) && complete.ValueKind == JsonValueKind.True)
+                done = true;
+        }
+    }
+
+    private static async Task CheckStatusAsync(HttpResponseMessage response, CancellationToken cancellation)
+    {
+        if (response.IsSuccessStatusCode) return;
+        string detail;
+        try
+        {
+            using var json = await ReadBoundedJsonAsync(response.Content, cancellation);
+            detail = json.RootElement.TryGetProperty("error", out var error) &&
+                error.ValueKind == JsonValueKind.String ? error.GetString() ?? "Fehler" : "HTTP-Fehler";
+        }
+        catch (Exception ex) when (ex is JsonException or InvalidDataException)
+        {
+            detail = "HTTP-Fehler";
+        }
+        throw new HttpRequestException($"Ollama HTTP {(int)response.StatusCode}: {detail}",
+            null, response.StatusCode);
+    }
+
+    private static async Task<string?> ReadBoundedLineAsync(StreamReader reader, int maxChars, CancellationToken ct)
+    {
+        var result = new StringBuilder();
+        var one = new char[1];
+        while (true)
+        {
+            var n = await reader.ReadAsync(one.AsMemory(), ct);
+            if (n == 0) return result.Length == 0 ? null
+                : throw new InvalidDataException("Incomplete Ollama stream message.");
+            if (one[0] == '\n') return result.ToString().TrimEnd('\r');
+            if (result.Length >= maxChars) throw new InvalidDataException("Ollama stream message too large.");
+            result.Append(one[0]);
+        }
+    }
+
+    private static async Task<JsonDocument> ReadBoundedJsonAsync(HttpContent content, CancellationToken cancellation)
+    {
+        if (content.Headers.ContentLength > MaxResponseBytes)
+            throw new InvalidDataException("Ollama-Antwort überschreitet das Größenlimit.");
+
+        await using var stream = await content.ReadAsStreamAsync(cancellation);
+        using var buffer = new MemoryStream();
+        var chunk = new byte[8192];
+        while (true)
+        {
+            var count = await stream.ReadAsync(chunk.AsMemory(), cancellation);
+            if (count == 0) break;
+            if (buffer.Length + count > MaxResponseBytes)
+                throw new InvalidDataException("Ollama-Antwort überschreitet das Größenlimit.");
+            buffer.Write(chunk, 0, count);
+        }
+        buffer.Position = 0;
+        return await JsonDocument.ParseAsync(buffer, cancellationToken: cancellation);
+    }
+
+    public void Dispose()
+    {
+        if (_ownsClient) _http.Dispose();
+    }
+}
+========== END FILE: src/Genesis.Ollama/OllamaClient.cs ==========
+
+========== BEGIN FILE: tests/Genesis.ProtocolSmoke/Genesis.ProtocolSmoke.csproj ==========
+GIT-BLOB-SHA: 454e112236e648326d7496b313a977608e334622
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup><OutputType>Exe</OutputType><TargetFramework>net8.0</TargetFramework><Nullable>enable</Nullable><ImplicitUsings>enable</ImplicitUsings></PropertyGroup>
+  <ItemGroup><ProjectReference Include="../../src/Genesis.Contracts/Genesis.Contracts.csproj" /></ItemGroup>
+</Project>
+
+========== END FILE: tests/Genesis.ProtocolSmoke/Genesis.ProtocolSmoke.csproj ==========
+
+========== BEGIN FILE: tests/Genesis.ProtocolSmoke/Program.cs ==========
+GIT-BLOB-SHA: 51a0cbdf36530ed21e7de451dca3083c35495d90
+using System.Text.Json;
+using Genesis.Contracts;
+
+static void Check(bool ok, string reason)
+{
+    if (!ok) throw new Exception(reason);
+}
+
+var request = new Request("remember", "GENESIS test");
+var wire = JsonSerializer.Serialize(request, Protocol.WireJson);
+Check(!wire.Contains('\n') && !wire.Contains('\r'), "Wire protocol must contain exactly one line");
+var roundtrip = JsonSerializer.Deserialize<Request>(wire, Protocol.WireJson);
+Check(roundtrip?.Command == "remember" && roundtrip.Text == "GENESIS test", "Request roundtrip failed");
+
+var snapshot = new Snapshot { Decisions = [new Decision("id1", "A", DateTimeOffset.UtcNow)] };
+var response = new Response(true, "ok", snapshot);
+var responseWire = JsonSerializer.Serialize(response, Protocol.WireJson);
+Check(!responseWire.Contains('\n') && !responseWire.Contains('\r'), "Response must contain exactly one line");
+var responseRoundtrip = JsonSerializer.Deserialize<Response>(responseWire, Protocol.WireJson)
+    ?? throw new Exception("Response deserialization returned null");
+Check(responseRoundtrip.Success && responseRoundtrip.Data?.SchemaVersion == 2, "Response roundtrip failed");
+Check(responseRoundtrip.Data!.Decisions.Count == 1, "Snapshot decision missing");
+
+Console.WriteLine("GENESIS Protocol Smoke: PASS (request, response, schema)");
+
+========== END FILE: tests/Genesis.ProtocolSmoke/Program.cs ==========
+
+========== BEGIN FILE: tests/Genesis.IntegrationSmoke/Genesis.IntegrationSmoke.csproj ==========
+GIT-BLOB-SHA: 97178d6839ad82c358dc4b05e6f237dfbe57f1be
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup><OutputType>Exe</OutputType><TargetFramework>net8.0</TargetFramework><Nullable>enable</Nullable><ImplicitUsings>enable</ImplicitUsings></PropertyGroup>
+  <ItemGroup><ProjectReference Include="../../src/Genesis.Contracts/Genesis.Contracts.csproj" /><ProjectReference Include="../../src/Genesis.Storage/Genesis.Storage.csproj" /></ItemGroup>
+</Project>
+
+========== END FILE: tests/Genesis.IntegrationSmoke/Genesis.IntegrationSmoke.csproj ==========
+
+========== BEGIN FILE: tests/Genesis.IntegrationSmoke/Program.cs ==========
+GIT-BLOB-SHA: a96226cd9b8092141ab60c52406cbd7a48d5202e
+using System.Diagnostics;
+using System.IO.Pipes;
+using System.Text;
+using System.Text.Json;
+using Genesis.Contracts;
+using Genesis.Storage;
+using Microsoft.Data.Sqlite;
+using System.Net;
+using System.Net.Sockets;
+
+if (args.Length != 1 || !File.Exists(args[0])) throw new Exception("Usage: IntegrationSmoke <full Genesis.Host.exe path>");
+var exe = Path.GetFullPath(args[0]);
+var dir = Path.Combine(Path.GetTempPath(), "Genesis-Integration-" + Guid.NewGuid().ToString("N"));
+Directory.CreateDirectory(dir);
+var pipeName = "genesis-ci-" + Guid.NewGuid().ToString("N");
+Process? host = null;
+await using var mockOllama = new FakeOllama();
+
+void Check(bool ok, string reason) { if (!ok) throw new Exception(reason); }
+Process Start(bool failTerminalPersistence = false, bool failProgressUpdate = false)
+{
+    var p = new Process { StartInfo = new ProcessStartInfo(exe) { UseShellExecute = false, CreateNoWindow = true } };
+    p.StartInfo.Environment["GENESIS_ALLOW_TEST_OVERRIDES"] = "1";
+    p.StartInfo.Environment["GENESIS_DATA_DIR"] = dir;
+    p.StartInfo.Environment["GENESIS_PIPE_NAME"] = pipeName;
+    p.StartInfo.Environment["GENESIS_OLLAMA_URL"] = mockOllama.Endpoint;
+    p.StartInfo.Environment["GENESIS_TEST_CANCEL_RELEASE_DELAY_MS"] = "800";
+    p.StartInfo.Environment["GENESIS_TEST_FAIL_CHAT_FINISH"] = failTerminalPersistence ? "1" : "0";
+    p.StartInfo.Environment["GENESIS_TEST_FAIL_CHAT_FALLBACK"] = failTerminalPersistence ? "1" : "0";
+    p.StartInfo.Environment["GENESIS_TEST_FAIL_CHAT_PROGRESS_ONCE"] = failProgressUpdate ? "1" : "0";
+    if (!p.Start()) throw new Exception("Host process did not start.");
+    return p;
+}
+async Task<Response> RequestAsync(string cmd, string? text = null, string? id = null, string? authToken = null, string? model = null)
+{
+    Exception? last = null;
+    for (var i = 0; i < 15; i++)
+    {
+        try
+        {
+            using var client = new NamedPipeClientStream(".", pipeName, PipeDirection.InOut,
+                PipeOptions.Asynchronous | PipeOptions.CurrentUserOnly);
+            await client.ConnectAsync(500);
+            using var writer = new StreamWriter(client, new UTF8Encoding(false), leaveOpen: true) { AutoFlush = true };
+            using var reader = new StreamReader(client, Encoding.UTF8, leaveOpen: true);
+            await writer.WriteLineAsync(JsonSerializer.Serialize(new Request(cmd, text, id, authToken, model), Protocol.WireJson));
+            using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+            var line = await reader.ReadLineAsync(timeout.Token);
+            return JsonSerializer.Deserialize<Response>(line ?? throw new Exception("Null response"), Protocol.WireJson)
+                ?? throw new Exception("No response object");
+        }
+        catch (Exception ex) when (ex is IOException or TimeoutException)
+        {
+            last = ex;
+            await Task.Delay(200);
+        }
+    }
+    throw new Exception("Host IPC unreachable", last);
+}
+async Task<Response> RawAsync(string line)
+{
+    using var client = new NamedPipeClientStream(".", pipeName, PipeDirection.InOut, PipeOptions.Asynchronous | PipeOptions.CurrentUserOnly);
+    await client.ConnectAsync(2000);
+    using var writer = new StreamWriter(client, new UTF8Encoding(false), leaveOpen: true) { AutoFlush = true };
+    using var reader = new StreamReader(client, Encoding.UTF8, leaveOpen: true);
+    await writer.WriteLineAsync(line);
+    return JsonSerializer.Deserialize<Response>((await reader.ReadLineAsync())!, Protocol.WireJson)!;
+}
+async Task WaitForChatBodyAsync(string prompt)
+{
+    for (var i = 0; i < 100; i++)
+    {
+        var raw = mockOllama.LastChatBody;
+        if (raw is not null)
+        {
+            try
+            {
+                using var document = JsonDocument.Parse(raw);
+                if (document.RootElement.GetProperty("messages").EnumerateArray().Any(message =>
+                    message.GetProperty("content").GetString()?.Contains(prompt, StringComparison.Ordinal) == true))
+                    return;
+            }
+            catch (JsonException) { }
+        }
+        await Task.Delay(50);
+    }
+    throw new Exception("Fake Ollama did not receive prompt: " + prompt);
+}
+async Task StopAsync()
+{
+    Check(!(await RequestAsync("stop")).Success, "Unauthenticated stop accepted");
+    var token = File.ReadAllText(Path.Combine(dir, "control.token")).Trim();
+    Check((await RequestAsync("stop", authToken: token)).Success, "Authenticated stop rejected");
+    // The host marks itself non-accepting before it sends the stop response.
+    // If the pipe listener is still draining, a late work request must be rejected.
+    try
+    {
+        var lateChat = await RequestAsync("chat", text: "must not be accepted during shutdown", model: "fake-alpha:1b");
+        Check(!lateChat.Success, "Host accepted a new chat after authenticated stop was requested");
+    }
+    catch (Exception ex) when (ex.Message == "Host IPC unreachable" || ex.InnerException is IOException) { }
+    Check(host is not null, "No host");
+    using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+    await host!.WaitForExitAsync(timeout.Token);
+    Check(host.ExitCode == 0, "Stop exit code " + host.ExitCode);
+    host.Dispose();
+    host = null;
+}
+try
+{
+    // Simulate a fully initialized 0.2.x SQLite schema-v1 database and its
+    // transactional upgrade to schema-v2 with preserved historical rows.
+    var migrationDir = Path.Combine(dir, "migration-v1");
+    Directory.CreateDirectory(migrationDir);
+    var migrationPath = Path.Combine(migrationDir, "genesis.db");
+    using (var db = new SqliteConnection($"Data Source={migrationPath};Pooling=False"))
+    {
+        db.Open();
+        using var sql = db.CreateCommand();
+        sql.CommandText = @"CREATE TABLE metadata(key TEXT PRIMARY KEY,value TEXT NOT NULL);
+            CREATE TABLE decisions(id TEXT PRIMARY KEY,text TEXT NOT NULL,created_at TEXT NOT NULL);
+            CREATE TABLE jobs(id TEXT PRIMARY KEY,title TEXT NOT NULL,state TEXT NOT NULL,
+                completed INTEGER NOT NULL,total INTEGER NOT NULL,created_at TEXT NOT NULL,error TEXT);
+            INSERT INTO metadata(key,value) VALUES ('initialized','1'),('schema_version','1');
+            INSERT INTO decisions(id,text,created_at) VALUES ('v1-decision','Originalvorgabe',$now);
+            INSERT INTO jobs(id,title,state,completed,total,created_at,error)
+                VALUES ('v1-job','Alte Aufgabe','done',10,10,$now,NULL);
+            INSERT INTO metadata(key,value) VALUES ('updated_at',$now);";
+        sql.Parameters.AddWithValue("$now", DateTimeOffset.UtcNow.ToString("O"));
+        sql.ExecuteNonQuery();
+    }
+    using (var migrated = new SnapshotStore(migrationDir))
+    {
+        var original = migrated.Read() ?? throw new Exception("SQLite migration returned no state");
+        Check(original.SchemaVersion == 2, "Snapshot contract version does not match SQLite schema v2");
+        Check(original.Decisions.Any(x => x.Id == "v1-decision"), "SQLite v1 decision lost on v2 upgrade");
+        Check(original.Jobs.Any(x => x.Id == "v1-job" && x.Completed == 10),
+            "SQLite v1 job lost on v2 upgrade");
+        migrated.AppendChatMessage(new ChatMessage("v2-message","main","user",
+            "Neue Chat-Tabelle", "fake-alpha:1b", DateTimeOffset.UtcNow));
+        Check(migrated.Read()!.ChatMessages.Any(x => x.Id == "v2-message"),
+            "Append-only chat table not available after v1 migration");
+    }
+
+    // A fresh database killed after DDL but before the first data commit must
+    // reopen safely: all v2 columns already exist, while metadata has no version yet.
+    var interruptedDir = Path.Combine(dir, "migration-interrupted");
+    Directory.CreateDirectory(interruptedDir);
+    var interruptedDb = Path.Combine(interruptedDir, "genesis.db");
+    using (var db = new SqliteConnection($"Data Source={interruptedDb};Pooling=False"))
+    {
+        db.Open();
+        using var sql = db.CreateCommand();
+        sql.CommandText = @"CREATE TABLE metadata(key TEXT PRIMARY KEY,value TEXT NOT NULL);
+            CREATE TABLE decisions(id TEXT PRIMARY KEY,text TEXT NOT NULL,created_at TEXT NOT NULL);
+            CREATE TABLE jobs(id TEXT PRIMARY KEY,title TEXT NOT NULL,state TEXT NOT NULL,
+                completed INTEGER NOT NULL,total INTEGER NOT NULL,created_at TEXT NOT NULL,error TEXT,
+                kind TEXT NOT NULL DEFAULT 'demo',model TEXT,prompt TEXT,result TEXT);";
+        sql.ExecuteNonQuery();
+    }
+    using (var repaired = new SnapshotStore(interruptedDir))
+    {
+        Check(repaired.Read() is null, "Uninitialized interrupted migration should remain uninitialized");
+        repaired.Commit(new Snapshot());
+        Check(repaired.Read()?.SchemaVersion == 2, "Interrupted migration could not be retried idempotently");
+    }
+
+    // Chat job and user turn must roll back together if inserting the message fails.
+    var atomicDir = Path.Combine(dir, "atomic-chat");
+    using (var atomic = new SnapshotStore(atomicDir))
+    {
+        atomic.Commit(new Snapshot());
+        var duplicate = new ChatMessage("duplicate-message", "main", "user",
+            "already stored", "fake-alpha:1b", DateTimeOffset.UtcNow);
+        atomic.AppendChatMessage(duplicate);
+        var candidateJob = new Job("must-rollback", "Atomic chat test", "queued", 0, 1,
+            DateTimeOffset.UtcNow, Kind: "chat", Model: "fake-alpha:1b", Prompt: "atomic");
+        try
+        {
+            atomic.CreateChatRequest(candidateJob, duplicate);
+            throw new Exception("Duplicate chat message unexpectedly accepted");
+        }
+        catch (SqliteException) { }
+        Check(!atomic.Read()!.Jobs.Any(j => j.Id == "must-rollback"),
+            "Failed chat message insert left an orphaned queued job");
+    }
+
+    // The runtime job window is bounded, but the full SQLite job history is preserved.
+    var retentionDir = Path.Combine(dir, "job-retention");
+    using (var retention = new SnapshotStore(retentionDir))
+    {
+        var created = DateTimeOffset.UtcNow.AddMinutes(-600);
+        var jobs = Enumerable.Range(0, 505).Select(i => new Job(
+            $"terminal-{i:D3}", $"Completed {i}", "done", 1, 1,
+            created.AddMinutes(i))).ToList();
+        jobs.Add(new Job("still-active", "Active job", "running", 1, 10, DateTimeOffset.UtcNow));
+        retention.Commit(new Snapshot { Jobs = jobs });
+        var afterCommit = retention.Read()!;
+        using (var countDb = new SqliteConnection($"Data Source={Path.Combine(retentionDir, "genesis.db")};Pooling=False"))
+        {
+            countDb.Open();
+            using var count = countDb.CreateCommand();
+            count.CommandText = "SELECT COUNT(*) FROM jobs";
+            Check(Convert.ToInt32(count.ExecuteScalar()) == 506,
+                "Recent-job window discarded older completed rows from SQLite");
+        }
+        Check(afterCommit.Jobs.Count(j => j.State == "done") == 500,
+            "Runtime job window did not load exactly the newest 500 completed jobs");
+        Check(afterCommit.Jobs.Any(j => j.Id == "terminal-504") &&
+            !afterCommit.Jobs.Any(j => j.Id == "terminal-000"),
+            "Runtime job window did not keep the newest completed jobs");
+        Check(afterCommit.Jobs.Any(j => j.Id == "still-active"),
+            "Runtime job window omitted an active job");
+
+        var nextChat = new Job("retention-chat", "Retention chat", "queued", 0, 1,
+            DateTimeOffset.UtcNow, Kind: "chat", Model: "fake-alpha:1b", Prompt: "retention");
+        var nextUser = new ChatMessage("retention-user", "main", "user", "retention",
+            "fake-alpha:1b", DateTimeOffset.UtcNow);
+        retention.CreateChatRequest(nextChat, nextUser);
+        var afterChat = retention.Read()!;
+        using (var countDb = new SqliteConnection($"Data Source={Path.Combine(retentionDir, "genesis.db")};Pooling=False"))
+        {
+            countDb.Open();
+            using var count = countDb.CreateCommand();
+            count.CommandText = "SELECT COUNT(*) FROM jobs";
+            Check(Convert.ToInt32(count.ExecuteScalar()) == 507,
+                "New chat request changed or deleted older archived job rows");
+        }
+        Check(afterChat.Jobs.Count(j => j.State == "done") == 500 &&
+            afterChat.Jobs.Any(j => j.Id == "still-active") &&
+            afterChat.Jobs.Any(j => j.Id == "retention-chat"),
+            "Creating a chat did not prune only old terminal jobs");
+    }
+
+    // Simulate migration of a real 0.1.x JSON state, preserving the source file.
+    var legacyPath = Path.Combine(dir, "state.json");
+    var legacyJobBase = DateTimeOffset.UtcNow.AddMinutes(-1000);
+    var legacyJobs = Enumerable.Range(0, 505).Select(i => new Job(
+        $"legacy-job-{i:D3}", $"Legacy completed job {i}", "done", 1, 1,
+        legacyJobBase.AddMinutes(i))).ToList();
+    var legacy = new Snapshot
+    {
+        Decisions = [new Decision("legacy-id", "Legacy imported", DateTimeOffset.UtcNow)],
+        Jobs = legacyJobs
+    };
+    File.WriteAllText(legacyPath, JsonSerializer.Serialize(legacy, Protocol.Json));
+    host = Start();
+    var initialized = await RequestAsync("status");
+    Check(initialized.Success, "Initial status");
+    Check(initialized.Data!.Decisions.Any(d => d.Text == "Legacy imported"), "Legacy data not imported");
+    Check(initialized.Data.Jobs.Count(j => j.State == "done") == 500 &&
+        !initialized.Data.Jobs.Any(j => j.Id == "legacy-job-000") &&
+        initialized.Data.Jobs.Any(j => j.Id == "legacy-job-504"),
+        "Host did not load a bounded recent-job window from a database with more than 500 completed jobs");
+    Check(File.Exists(legacyPath), "Migration deleted original JSON file");
+    Check(File.Exists(Path.Combine(dir, "genesis.db")), "SQLite database not initialized");
+    var installedModels = await RequestAsync("models");
+    Check(installedModels.Success && installedModels.Models?.Contains("fake-alpha:1b") == true,
+        "Host model discovery over Pipe failed");
+    Check((await RequestAsync("remember", "Beschluss: Antworten auf Deutsch.")).Success,
+        "Could not add context decision");
+    mockOllama.DelayChat = true;
+    var chat = await RequestAsync("chat", text: "Hallo Chat", model: "fake-alpha:1b");
+    Check(chat.Success && chat.Data?.Jobs.Any(j => j.Kind == "chat") == true, "Chat job not accepted");
+    var jobId = chat.Data!.Jobs.Last(j => j.Kind == "chat").Id;
+    await WaitForChatBodyAsync("Hallo Chat");
+    Check(!(await RequestAsync("chat", text: "parallel", model: "fake-alpha:1b")).Success,
+        "Concurrent model job must be rejected rather than use another GPU slot");
+    mockOllama.DelayChat = false;
+    var chatStatusStopwatch = Stopwatch.StartNew();
+    Check((await RequestAsync("status")).Success, "Chat blocked ordinary status");
+    Check(chatStatusStopwatch.Elapsed < TimeSpan.FromSeconds(3), "Chat used up IPC slots");
+    Job? completedChat = null;
+    for (var i = 0; i < 40; i++)
+    {
+        var current = (await RequestAsync("status")).Data!;
+        completedChat = current.Jobs.Single(j => j.Id == jobId);
+        if (completedChat.State == "done") break;
+        await Task.Delay(200);
+    }
+    Check(completedChat?.State == "done" && completedChat.Result == "Hallo von Fake-Ollama!",
+        $"Chat streaming failed: state={completedChat?.State}, error={completedChat?.Error}, result={completedChat?.Result}; host log: " +
+            (File.Exists(Path.Combine(dir, "host.log")) ? File.ReadAllText(Path.Combine(dir, "host.log")) : "missing"));
+    var history = (await RequestAsync("status")).Data!.ChatMessages;
+    Check(history.Any(m => m.Role == "user" && m.Text == "Hallo Chat"), "User message not persisted");
+    Check(history.Any(m => m.Role == "assistant" && m.Text == "Hallo von Fake-Ollama!"),
+        "Model reply not persisted");
+    using (var firstBody = JsonDocument.Parse(mockOllama.LastChatBody ?? throw new Exception("Fake Ollama did not capture chat request")))
+    {
+        var firstMessages = firstBody.RootElement.GetProperty("messages").EnumerateArray().ToArray();
+        Check(firstMessages.Any(m => m.GetProperty("role").GetString() == "system" &&
+            m.GetProperty("content").GetString()!.Contains("Beschluss: Antworten auf Deutsch.")),
+            "Saved decision was not sent to Ollama as context");
+        Check(firstMessages.Any(m => m.GetProperty("role").GetString() == "user" &&
+            m.GetProperty("content").GetString() == "Hallo Chat"),
+            "Current user prompt missing from Ollama context");
+    }
+    var followup = await RequestAsync("chat", text: "Folgefrage", model: "fake-alpha:1b");
+    Check(followup.Success, "Follow-up chat not accepted");
+    var followupId = followup.Data!.Jobs.Last(j => j.Kind == "chat").Id;
+    for (var i = 0; i < 40; i++)
+    {
+        var job = (await RequestAsync("status")).Data!.Jobs.Single(j => j.Id == followupId);
+        if (job.State is "done" or "failed") break;
+        await Task.Delay(100);
+    }
+    using (var followupBody = JsonDocument.Parse(mockOllama.LastChatBody ?? throw new Exception("No follow-up request captured")))
+    {
+        var followupMessages = followupBody.RootElement.GetProperty("messages").EnumerateArray().ToArray();
+        Check(followupMessages.Any(m => m.GetProperty("role").GetString() == "user" &&
+            m.GetProperty("content").GetString() == "Hallo Chat"), "Prior user turn missing from context");
+        Check(followupMessages.Any(m => m.GetProperty("role").GetString() == "assistant" &&
+            m.GetProperty("content").GetString() == "Hallo von Fake-Ollama!"), "Prior assistant turn missing from context");
+    }
+
+    // Decision context is indivisible: retain the newest complete decisions and
+    // explicitly disclose older decisions excluded by the context budget.
+    var oldDecision = "OLD-DECISION-BEGIN-" + new string('O', 1970) + "-OLD-END";
+    var middleDecision = "MIDDLE-DECISION-BEGIN-" + new string('M', 1960) + "-MIDDLE-END";
+    var newestDecision = "NEWEST-DECISION-BEGIN-" + new string('N', 1460) + "-NEWEST-END";
+    Check(oldDecision.Length <= 2000 && middleDecision.Length <= 2000 && newestDecision.Length <= 2000,
+        "Decision context fixtures exceed the supported decision size");
+    Check((await RequestAsync("remember", oldDecision)).Success, "Could not add old context fixture");
+    Check((await RequestAsync("remember", middleDecision)).Success, "Could not add middle context fixture");
+    Check((await RequestAsync("remember", newestDecision)).Success, "Could not add newest context fixture");
+    var boundedContextChat = await RequestAsync("chat", text: "Kontextgrenze pruefen", model: "fake-alpha:1b");
+    Check(boundedContextChat.Success, "Context-boundary chat was not accepted");
+    var boundedContextId = boundedContextChat.Data!.Jobs.Last(j => j.Kind == "chat").Id;
+    await WaitForChatBodyAsync("Kontextgrenze pruefen");
+    Job? boundedContextJob = null;
+    for (var i = 0; i < 40; i++)
+    {
+        boundedContextJob = (await RequestAsync("status")).Data!.Jobs.Single(j => j.Id == boundedContextId);
+        if (boundedContextJob.State is "done" or "failed") break;
+        await Task.Delay(100);
+    }
+    Check(boundedContextJob?.State == "done", "Context-boundary chat did not complete");
+    using (var boundedBody = JsonDocument.Parse(mockOllama.LastChatBody ?? throw new Exception("No bounded-context request captured")))
+    {
+        var systemContext = string.Join("\n", boundedBody.RootElement.GetProperty("messages").EnumerateArray()
+            .Where(m => m.GetProperty("role").GetString() == "system")
+            .Select(m => m.GetProperty("content").GetString()));
+        Check(systemContext.Contains(middleDecision, StringComparison.Ordinal) &&
+            systemContext.Contains(newestDecision, StringComparison.Ordinal),
+            "Newest complete decisions were not included in the model context");
+        Check(!systemContext.Contains(oldDecision, StringComparison.Ordinal),
+            "Older oversized decision was partially or unexpectedly included");
+        Check(systemContext.Contains("Beschlüsse wurden wegen des Kontextbudgets nicht übernommen", StringComparison.Ordinal),
+            "Omitted decisions were not disclosed in the model context");
+    }
+
+    // Inject exactly one non-terminal progress-write failure after the first
+    // streamed chunk. The model stream must continue and the final response commit.
+    await StopAsync();
+    host = Start(failProgressUpdate: true);
+    mockOllama.ChatDelayMs = 5000;
+    mockOllama.DelayChat = true;
+    var progressResilienceChat = await RequestAsync("chat",
+        text: "Progress write resilience", model: "fake-alpha:1b");
+    Check(progressResilienceChat.Success, "Progress-resilience chat was not accepted");
+    var progressResilienceId = progressResilienceChat.Data!.Jobs.Last(j => j.Kind == "chat").Id;
+    await WaitForChatBodyAsync("Progress write resilience");
+    Job? progressResilienceJob = null;
+    for (var i = 0; i < 100; i++)
+    {
+        progressResilienceJob = (await RequestAsync("status")).Data!.Jobs.Single(j => j.Id == progressResilienceId);
+        if (progressResilienceJob.State is "done" or "failed") break;
+        await Task.Delay(100);
+    }
+    Check(progressResilienceJob?.State == "done" &&
+        progressResilienceJob.Result == "Hallo von Fake-Ollama!",
+        "Transient progress-write failure incorrectly failed or lost the model response");
+    var progressLog = File.Exists(Path.Combine(dir, "host.log"))
+        ? File.ReadAllText(Path.Combine(dir, "host.log")) : "(host.log missing)";
+    Check(progressLog.Contains("Chat progress update failed; generation continues", StringComparison.Ordinal),
+        "The injected transient progress-write failure was not diagnosed. Host log: " + progressLog);
+    mockOllama.DelayChat = false;
+    mockOllama.ChatDelayMs = 5000;
+    await StopAsync();
+    host = Start();
+
+    mockOllama.FailMidStream = true;
+    var failedChat = await RequestAsync("chat", text: "Bitte simuliere einen Streamfehler", model: "fake-alpha:1b");
+    Check(failedChat.Success, "Mid-stream failure test chat not accepted");
+    var failedId = failedChat.Data!.Jobs.Last(j => j.Kind == "chat").Id;
+    Job? failedJob = null;
+    for (var i = 0; i < 40; i++)
+    {
+        failedJob = (await RequestAsync("status")).Data!.Jobs.Single(j => j.Id == failedId);
+        if (failedJob.State == "failed") break;
+        await Task.Delay(100);
+    }
+    Check(failedJob?.State == "failed" && failedJob.Error?.Contains("synthetic mid-stream failure") == true,
+        "Mid-stream Ollama error was not persisted on the chat job");
+    Check((await RequestAsync("status")).Data!.ChatMessages.Any(m =>
+        m.Role == "assistant" && m.Text.Contains("Generierung fehlgeschlagen")),
+        "Failed chat did not persist an assistant failure marker");
+    mockOllama.FailMidStream = false;
+    mockOllama.DelayChat = true;
+    var slowChat = await RequestAsync("chat", text: "langsam", model: "fake-alpha:1b");
+    Check(slowChat.Success, "Slow chat not accepted");
+    var slowId = slowChat.Data!.Jobs.Last(j => j.Kind == "chat").Id;
+    await WaitForChatBodyAsync("langsam");
+    var cancelResponse = await RequestAsync("chat-cancel", id: slowId);
+    Check(cancelResponse.Success && cancelResponse.Message.Contains("Abbruch läuft"),
+        "Chat cancel did not report the canceling state");
+    var cancelingState = (await RequestAsync("status")).Data!.Jobs.Single(j => j.Id == slowId).State;
+    Check(cancelingState == "canceling", "Chat was shown canceled before model gate release");
+    Check(!(await RequestAsync("chat", text: "too early", model: "fake-alpha:1b")).Success,
+        "A new model request was accepted before the previous model gate was released");
+    Job? canceledChat = null;
+    for (var i = 0; i < 40; i++)
+    {
+        canceledChat = (await RequestAsync("status")).Data!.Jobs.Single(j => j.Id == slowId);
+        if (canceledChat.State == "canceled") break;
+        await Task.Delay(100);
+    }
+    Check(canceledChat?.State == "canceled", "Canceled chat did not reach terminal canceled state");
+    Check((await RequestAsync("status")).Data!.ChatMessages.Any(m =>
+        m.Role == "assistant" && m.Text.Contains("Antwort abgebrochen")),
+        "Canceled chat did not persist an assistant cancellation marker");
+    mockOllama.DelayChat = false;
+
+    // A deliberately stalled client must not block an independent status request.
+    using (var slow = new NamedPipeClientStream(".", pipeName, PipeDirection.InOut,
+        PipeOptions.Asynchronous | PipeOptions.CurrentUserOnly))
+    {
+        await slow.ConnectAsync(2000);
+        await slow.WriteAsync(Encoding.UTF8.GetBytes("{")); // no newline
+        await slow.FlushAsync();
+        var watch = Stopwatch.StartNew();
+        Check((await RequestAsync("status")).Success, "Second client blocked by unfinished first request");
+        Check(watch.Elapsed < TimeSpan.FromSeconds(3), "Slow client blocked Host accept loop");
+    }
+
+    Check(!(await RawAsync("{}")).Success, "Invalid command accepted");
+    Check(!(await RawAsync("{bad json")).Success, "Invalid JSON accepted");
+    // The host must reject an over-limit request without poisoning subsequent clients.
+    using (var oversized = new NamedPipeClientStream(".", pipeName, PipeDirection.InOut,
+        PipeOptions.Asynchronous | PipeOptions.CurrentUserOnly))
+    {
+        await oversized.ConnectAsync(2000);
+        var outgoing = new StreamWriter(oversized, new UTF8Encoding(false), leaveOpen: true) { AutoFlush = true };
+        using var incoming = new StreamReader(oversized, Encoding.UTF8, leaveOpen: true);
+        // Write and read concurrently: the server intentionally stops reading at 64 Ki chars.
+        var writing = outgoing.WriteAsync(new string('Z', 100000));
+        using var maxWait = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+        var largeReply = await incoming.ReadLineAsync(maxWait.Token);
+        try { await writing.WaitAsync(maxWait.Token); } catch (IOException) { /* server closed after rejecting input */ }
+        var largeResponse = JsonSerializer.Deserialize<Response>(largeReply!, Protocol.WireJson);
+        Check(largeResponse is { Success: false }, "Oversize pipe request was not rejected");
+        // Server deliberately closes a rejected oversized request. StreamWriter.Dispose
+        // can flush into that closed pipe; it is an expected condition, not a test failure.
+        try { outgoing.Dispose(); } catch (IOException) { }
+    }
+    Check((await RequestAsync("status")).Success, "Host unusable after oversize request");
+
+    Check(!(await RequestAsync("remember", new string('X', 2001))).Success, "Overlong decision accepted");
+    Check((await RequestAsync("remember", new string('Y', 2000))).Success,
+        "Exactly 2000-character decision rejected");
+    Check(File.Exists(Path.Combine(dir, "genesis.db")), "SQLite database absent after first save");
+    Check(!(await RequestAsync("stop", authToken: "0000000000000000000000000000000000000000000000000000000000000000")).Success,
+        "Wrong control token accepted");
+
+    Check((await RequestAsync("remember", "Persisted")).Success, "Remember failed");
+    var demo = await RequestAsync("start-demo");
+    Check(demo.Success, "Start demo failed");
+    var running = demo.Data!.Jobs.Last();
+    await Task.Delay(2200);
+    var progressed = await RequestAsync("status");
+    var position = progressed.Data!.Jobs.Single(x => x.Id == running.Id).Completed;
+    Check(position >= 1, "No worker progress");
+    // Second host may not take over the same exclusive data directory.
+    using (var duplicate = Start())
+    {
+        using var duplicateTimeout = new CancellationTokenSource(TimeSpan.FromSeconds(5));
+        await duplicate.WaitForExitAsync(duplicateTimeout.Token);
+        Check(duplicate.ExitCode != 0, "Duplicate host accepted");
+    }
+    host.Kill(entireProcessTree: true);
+    await host.WaitForExitAsync();
+    host.Dispose();
+    host = Start();
+    var resumed = (await RequestAsync("status")).Data!.Jobs.Single(x => x.Id == running.Id);
+    Check(resumed.Completed >= position, "Job progress lost after restart");
+    for (var i = 0; i < 20; i++)
+    {
+        var after = (await RequestAsync("status")).Data!.Jobs.Single(x => x.Id == running.Id);
+        if (after.State == "done") break;
+        await Task.Delay(500);
+    }
+    var completed = (await RequestAsync("status")).Data!.Jobs.Single(x => x.Id == running.Id);
+    Check(completed.State == "done" && completed.Completed == 10, "Job did not complete");
+    var cancel = await RequestAsync("start-demo");
+    var secondId = cancel.Data!.Jobs.Last().Id;
+    Check((await RequestAsync("cancel", id: secondId)).Success, "Cancel failed");
+    await Task.Delay(1800);
+    var cancelled = (await RequestAsync("status")).Data!.Jobs.Single(x => x.Id == secondId);
+    Check(cancelled.State == "canceled", "Canceled job continued");
+    mockOllama.DelayChat = true;
+    var stopDuringChat = await RequestAsync("chat", text: "Host wird während des Chats beendet", model: "fake-alpha:1b");
+    Check(stopDuringChat.Success, "Chat for host-stop test not accepted");
+    var stopChatId = stopDuringChat.Data!.Jobs.Last(j => j.Kind == "chat").Id;
+    await WaitForChatBodyAsync("Host wird während des Chats beendet");
+    await StopAsync();
+    using (var afterStop = new SnapshotStore(dir))
+    {
+        var stoppedState = afterStop.Read() ?? throw new Exception("Database missing after host stop");
+        Check(stoppedState.Jobs.Single(j => j.Id == stopChatId).State == "canceled",
+            "Host shutdown did not persist active chat cancellation");
+    }
+    mockOllama.DelayChat = false;
+    // A restart must continue to use SQLite rather than re-importing stale JSON.
+    host = Start();
+    var sqliteReload = await RequestAsync("status");
+    Check(sqliteReload.Success, "SQLite restart failed");
+    Check(sqliteReload.Data!.Decisions.Any(d => d.Text == "Persisted"), "SQLite data missing on restart");
+    Check(sqliteReload.Data.Decisions.Any(d => d.Text == "Legacy imported"), "Migrated data lost");
+    Check(sqliteReload.Data.ChatMessages.Any(m => m.Role == "assistant" && m.Text == "Hallo von Fake-Ollama!"), "Chat history lost after restart");
+
+    // A hard host kill during streaming must be repaired on the next startup.
+    mockOllama.DelayChat = true;
+    var crashChat = await RequestAsync("chat", text: "Chat bei hartem Host-Abbruch", model: "fake-alpha:1b");
+    Check(crashChat.Success, "Crash-recovery chat not accepted");
+    var crashChatId = crashChat.Data!.Jobs.Last(j => j.Kind == "chat").Id;
+    await WaitForChatBodyAsync("Chat bei hartem Host-Abbruch");
+    host!.Kill(entireProcessTree: true);
+    await host.WaitForExitAsync();
+    host.Dispose();
+    host = null;
+    mockOllama.DelayChat = false;
+    host = Start();
+    var recovered = (await RequestAsync("status")).Data!;
+    Check(recovered.Jobs.Single(j => j.Id == crashChatId).State == "failed",
+        "Interrupted chat was not marked failed after hard host restart");
+    Check(recovered.ChatMessages.Any(m => m.Role == "assistant" &&
+        m.Text.Contains("Host-Neustart unterbrochen")),
+        "Interrupted chat did not receive an assistant recovery marker");
+    await StopAsync();
+
+    // If both terminal persistence and its fallback fail, memory must not claim
+    // the worker is still running, and the host must reject further writes.
+    host = Start(failTerminalPersistence: true);
+    var persistenceFailureChat = await RequestAsync("chat",
+        text: "Persistenz-Fail-Closed pruefen", model: "fake-alpha:1b");
+    Check(persistenceFailureChat.Success, "Persistence fault-injection chat was not accepted");
+    var persistenceFailureId = persistenceFailureChat.Data!.Jobs.Last(j => j.Kind == "chat").Id;
+    Job? persistenceFailureJob = null;
+    for (var i = 0; i < 40; i++)
+    {
+        var status = await RequestAsync("status");
+        persistenceFailureJob = status.Data!.Jobs.Single(j => j.Id == persistenceFailureId);
+        if (persistenceFailureJob.State == "failed" && status.Message.Contains("schreibgeschützt", StringComparison.OrdinalIgnoreCase))
+            break;
+        await Task.Delay(100);
+    }
+    Check(persistenceFailureJob?.State == "failed",
+        "Double persistence failure left the in-memory job looking active");
+    Check(!(await RequestAsync("chat", text: "must be blocked", model: "fake-alpha:1b")).Success,
+        "Host accepted a new write after terminal persistence failed");
+    await StopAsync();
+
+    // A normal restart must repair the still-open DB job once persistence is writable again.
+    host = Start();
+    var persistenceRecovered = (await RequestAsync("status")).Data!;
+    Check(persistenceRecovered.Jobs.Single(j => j.Id == persistenceFailureId).State == "failed",
+        "Host restart did not recover the job left open by injected persistence failures");
+    Check(persistenceRecovered.ChatMessages.Any(m => m.Role == "assistant" &&
+        m.Text.Contains("Host-Neustart unterbrochen")),
+        "Host restart did not add a recovery marker after persistence failure");
+    await StopAsync();
+
+    // A syntactically valid SQLite database can still carry invalid application values.
+    var dbPath = Path.Combine(dir, "genesis.db");
+    using (var db = new SqliteConnection($"Data Source={dbPath};Pooling=False"))
+    {
+        db.Open();
+        using var invalidDate = db.CreateCommand();
+        invalidDate.CommandText = "UPDATE decisions SET created_at='kein-datum' WHERE id='legacy-id'";
+        Check(invalidDate.ExecuteNonQuery() == 1, "Date integrity fixture missing");
+    }
+    using (var badDateHost = Start())
+    {
+        using var startupTimeout = new CancellationTokenSource(TimeSpan.FromSeconds(5));
+        await badDateHost.WaitForExitAsync(startupTimeout.Token);
+        Check(badDateHost.ExitCode != 0, "Invalid SQLite datetime allowed startup");
+        Check(Directory.EnumerateFiles(dir, "genesis.db.corrupt-*").Any(),
+            "Invalid SQLite values not preserved in quarantine copy");
+    }
+    using (var db = new SqliteConnection($"Data Source={dbPath};Pooling=False"))
+    {
+        db.Open();
+        using var repair = db.CreateCommand();
+        repair.CommandText = "UPDATE decisions SET created_at=$date WHERE id='legacy-id'";
+        repair.Parameters.AddWithValue("$date", DateTimeOffset.UtcNow.ToString("O"));
+        Check(repair.ExecuteNonQuery() == 1, "Could not restore date fixture");
+    }
+
+    // An initialized database without a schema version must fail closed rather than
+    // being misinterpreted as a fresh database and reimporting stale legacy JSON.
+    var database = Path.Combine(dir, "genesis.db");
+    using (var db = new SqliteConnection($"Data Source={database};Pooling=False"))
+    {
+        db.Open();
+        using var remove = db.CreateCommand();
+        remove.CommandText = "DELETE FROM metadata WHERE key='schema_version'";
+        Check(remove.ExecuteNonQuery() == 1, "Schema metadata not present before test");
+    }
+    using (var missingSchemaHost = Start())
+    {
+        using var startupTimeout = new CancellationTokenSource(TimeSpan.FromSeconds(5));
+        await missingSchemaHost.WaitForExitAsync(startupTimeout.Token);
+        Check(missingSchemaHost.ExitCode != 0, "Missing schema version accepted");
+    }
+    using (var db = new SqliteConnection($"Data Source={database};Pooling=False"))
+    {
+        db.Open();
+        using var restore = db.CreateCommand();
+        restore.CommandText = "INSERT INTO metadata(key,value) VALUES ('schema_version','2')";
+        restore.ExecuteNonQuery();
+    }
+
+    // Invalid SQLite must stop startup and must never silently fall back to stale JSON.
+    var quarantineCountBeforeCorruption = Directory.EnumerateFiles(dir, "genesis.db.corrupt-*").Count();
+    File.WriteAllText(database, "{not a sqlite database");
+    var corruptedBytes = File.ReadAllBytes(database);
+    using (var invalidHost = Start())
+    {
+        using var invalidTimeout = new CancellationTokenSource(TimeSpan.FromSeconds(5));
+        await invalidHost.WaitForExitAsync(invalidTimeout.Token);
+        Check(invalidHost.ExitCode != 0, "Corrupt SQLite should prevent startup");
+        Check(File.ReadAllBytes(database).SequenceEqual(corruptedBytes), "Corrupt database replaced unexpectedly");
+        Check(Directory.EnumerateFiles(dir, "genesis.db.corrupt-*").Count() > quarantineCountBeforeCorruption,
+            "Corrupt SQLite file did not produce a new quarantine copy");
+    }
+    Console.WriteLine("GENESIS Integration Smoke PASS: SQLite migration, transactions, restart, jobs, cancellation, concurrency, auth, corrupt database fail-closed");
+
+}
+finally
+{
+    if (host is not null)
+    {
+        try { if (!host.HasExited) host.Kill(entireProcessTree: true); } catch { }
+        host.Dispose();
+    }
+    try { Directory.Delete(dir, recursive: true); } catch { }
+}
+
+
+sealed class FakeOllama : IAsyncDisposable
+{
+    private readonly TcpListener _listener = new(IPAddress.Loopback, 0);
+    private readonly CancellationTokenSource _stop = new();
+    private readonly Task _acceptTask;
+    public string Endpoint { get; }
+    public volatile bool DelayChat;
+    public volatile int ChatDelayMs = 5000;
+    public volatile bool FailMidStream;
+    private string? _lastChatBody;
+    public string? LastChatBody => Volatile.Read(ref _lastChatBody);
+
+    public FakeOllama()
+    {
+        _listener.Start();
+        Endpoint = $"http://127.0.0.1:{((IPEndPoint)_listener.LocalEndpoint).Port}/";
+        _acceptTask = Task.Run(AcceptAsync);
+    }
+
+    private async Task AcceptAsync()
+    {
+        while (!_stop.IsCancellationRequested)
+        {
+            try
+            {
+                var client = await _listener.AcceptTcpClientAsync(_stop.Token);
+                _ = Task.Run(() => ReplyAsync(client));
+            }
+            catch (OperationCanceledException) { break; }
+            catch (ObjectDisposedException) { break; }
+        }
+    }
+
+    private async Task ReplyAsync(TcpClient client)
+    {
+        using (client)
+        {
+            try
+            {
+                var stream = client.GetStream();
+                var header = new List<byte>();
+                var byteBuffer = new byte[1];
+                while (header.Count < 16384)
+                {
+                    if (await stream.ReadAsync(byteBuffer, _stop.Token) == 0) return;
+                    header.Add(byteBuffer[0]);
+                    var n = header.Count;
+                    if (n >= 4 && header[n-4] == 13 && header[n-3] == 10 &&
+                        header[n-2] == 13 && header[n-1] == 10) break;
+                }
+                var request = Encoding.ASCII.GetString(header.ToArray());
+                // HttpClient may send JSON using either Content-Length or chunked framing.
+                // The request body must be drained before closing, otherwise Windows
+                // may reset the TCP connection while the client is reading the response.
+                var headers = request.Split("\r\n", StringSplitOptions.RemoveEmptyEntries);
+                var lengthLine = headers.FirstOrDefault(x => x.StartsWith("Content-Length:", StringComparison.OrdinalIgnoreCase));
+                var isChunked = headers.Any(x => x.StartsWith("Transfer-Encoding:", StringComparison.OrdinalIgnoreCase)
+                    && x.Contains("chunked", StringComparison.OrdinalIgnoreCase));
+                using var requestBody = new MemoryStream();
+                if (lengthLine is not null && int.TryParse(lengthLine[(lengthLine.IndexOf(':') + 1)..].Trim(), out var bodyLength))
+                {
+                    var bodyBytes = await ReadExactAsync(stream, bodyLength, _stop.Token);
+                    requestBody.Write(bodyBytes);
+                }
+                else if (isChunked)
+                {
+                    while (true)
+                    {
+                        var lengthText = await ReadAsciiLineAsync(stream, _stop.Token);
+                        var size = Convert.ToInt32(lengthText.Split(';')[0], 16);
+                        if (size == 0)
+                        {
+                            while ((await ReadAsciiLineAsync(stream, _stop.Token)).Length > 0) { }
+                            break;
+                        }
+                        var chunk = await ReadExactAsync(stream, size, _stop.Token);
+                        requestBody.Write(chunk);
+                        await ReadExactAsync(stream, 2, _stop.Token); // CRLF
+                    }
+                }
+                var requestBodyText = Encoding.UTF8.GetString(requestBody.ToArray());
+                string body;
+                if (request.StartsWith("GET /api/tags", StringComparison.Ordinal))
+                {
+                    body = "{\"models\":[{\"name\":\"fake-alpha:1b\"}]}";
+                }
+                else if (request.StartsWith("POST /api/chat", StringComparison.Ordinal))
+                {
+                    var delayThisChat = DelayChat;
+                    var failThisChat = FailMidStream;
+                    Volatile.Write(ref _lastChatBody, requestBodyText);
+                    if (delayThisChat) await Task.Delay(ChatDelayMs, _stop.Token);
+                    body = failThisChat
+                        ? "{\"message\":{\"role\":\"assistant\",\"content\":\"Teilantwort\"},\"done\":false}\n" +
+                          "{\"error\":\"synthetic mid-stream failure\"}\n"
+                        : "{\"message\":{\"role\":\"assistant\",\"content\":\"Hallo von \"},\"done\":false}\n" +
+                          "{\"message\":{\"role\":\"assistant\",\"content\":\"Fake-Ollama!\"},\"done\":true}\n";
+                }
+                else
+                {
+                    body = "{}";
+                }
+                var bytes = Encoding.UTF8.GetBytes(body);
+                var head = Encoding.ASCII.GetBytes("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: " +
+                    bytes.Length + "\r\nConnection: close\r\n\r\n");
+                await stream.WriteAsync(head, _stop.Token);
+                await stream.WriteAsync(bytes, _stop.Token);
+                await stream.FlushAsync(_stop.Token);
+            }
+            catch (Exception ex) when (ex is IOException or SocketException or OperationCanceledException) { }
+        }
+    }
+
+    private static async Task<byte[]> ReadExactAsync(NetworkStream stream, int count, CancellationToken cancellation)
+    {
+        if (count < 0 || count > 2 * 1024 * 1024) throw new InvalidDataException("Invalid mock body length.");
+        var result = new byte[count];
+        var offset = 0;
+        while (offset < count)
+        {
+            var read = await stream.ReadAsync(result.AsMemory(offset, count - offset), cancellation);
+            if (read == 0) throw new EndOfStreamException();
+            offset += read;
+        }
+        return result;
+    }
+
+    private static async Task<string> ReadAsciiLineAsync(NetworkStream stream, CancellationToken cancellation)
+    {
+        var bytes = new List<byte>();
+        var one = new byte[1];
+        while (bytes.Count < 1024)
+        {
+            if (await stream.ReadAsync(one, cancellation) == 0) throw new EndOfStreamException();
+            if (one[0] == 10) return Encoding.ASCII.GetString(bytes.ToArray()).TrimEnd('\r');
+            bytes.Add(one[0]);
+        }
+        throw new InvalidDataException("Mock HTTP header line too large.");
+    }
+
+    public async ValueTask DisposeAsync()
+    {
+        _stop.Cancel();
+        _listener.Stop();
+        try { await _acceptTask; } catch (OperationCanceledException) { }
+        _stop.Dispose();
+    }
+}
+
+========== END FILE: tests/Genesis.IntegrationSmoke/Program.cs ==========
+
+========== BEGIN FILE: tests/Genesis.OllamaSmoke/Genesis.OllamaSmoke.csproj ==========
+GIT-BLOB-SHA: e5a6bb068157b198c5070b6c10402bbfa2eb69d0
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup><OutputType>Exe</OutputType><TargetFramework>net8.0</TargetFramework><Nullable>enable</Nullable><ImplicitUsings>enable</ImplicitUsings></PropertyGroup>
+  <ItemGroup><ProjectReference Include="../../src/Genesis.Ollama/Genesis.Ollama.csproj" /></ItemGroup>
+</Project>
+========== END FILE: tests/Genesis.OllamaSmoke/Genesis.OllamaSmoke.csproj ==========
+
+========== BEGIN FILE: tests/Genesis.OllamaSmoke/Program.cs ==========
+GIT-BLOB-SHA: 3a51358d4553ceb5aa1426db542b49969bd56b6d
+using System.Net;
+using System.Text;
+using System.Text.Json;
+using Genesis.Ollama;
+
+static void Check(bool ok, string reason)
+{
+    if (!ok) throw new Exception(reason);
+}
+using var handler = new MockOllamaHandler();
+using var http = new HttpClient(handler) { BaseAddress = new Uri("http://127.0.0.1:11434/") };
+using var ollama = new OllamaClient(http);
+var models = await ollama.ModelsAsync();
+Check(models.Length == 2 && models[0] == "qwen3.5:9b", "Ollama model discovery failed");
+var answer = await ollama.ChatAsync("qwen3.5:9b", "Hallo JOSHUA");
+Check(answer == "Hallo! Ich bin lokal.", "Ollama chat response invalid");
+Check(handler.SawPost && handler.ChatModel == "qwen3.5:9b" && handler.ChatPrompt == "Hallo JOSHUA",
+    "Ollama request schema invalid");
+try
+{
+    await ollama.ChatAsync("", "Hallo");
+    throw new Exception("Empty model was accepted");
+}
+catch (ArgumentException) { }
+handler.ChatReplyOverride = "{bad-json";
+try
+{
+    await ollama.ChatAsync("qwen3.5:9b", "Test");
+    throw new Exception("Malformed Ollama JSON unexpectedly accepted");
+}
+catch (JsonException) { }
+handler.ChatReplyOverride = "{\"message\":{\"content\":\"" + new string('A', 2 * 1024 * 1024 + 100) + "\"}}";
+try
+{
+    await ollama.ChatAsync("qwen3.5:9b", "Test");
+    throw new Exception("Oversize Ollama response unexpectedly accepted");
+}
+catch (InvalidDataException) { }
+handler.ChatReplyOverride = null;
+var fragments = new List<string>();
+await foreach (var fragment in ollama.ChatStreamAsync("qwen3.5:9b",
+    [new ChatTurn("system", "Antworte kurz."), new ChatTurn("user", "Hallo Streaming")]))
+{
+    fragments.Add(fragment);
+}
+Check(string.Concat(fragments) == "Hallo Streaming!",
+    "Incremental Ollama streaming failed");
+handler.ForceMissingModel = true;
+try
+{
+    await foreach (var ignored in ollama.ChatStreamAsync("missing-model",
+        [new ChatTurn("user", "Hallo")])) { }
+    throw new Exception("Model-not-found HTTP failure silently accepted");
+}
+catch (HttpRequestException ex)
+{
+    Check(ex.Message.Contains("model not found", StringComparison.OrdinalIgnoreCase),
+        "Expected Ollama model error detail");
+}
+handler.ForceMissingModel = false;
+Console.WriteLine("GENESIS Ollama Smoke PASS: model listing, chat schema, response, malformed JSON, bounded payload");
+
+
+sealed class MockOllamaHandler : HttpMessageHandler
+{
+    public bool SawPost { get; private set; }
+    public string? ChatReplyOverride { get; set; }
+    public bool ForceMissingModel { get; set; }
+    public string? ChatModel { get; private set; }
+    public string? ChatPrompt { get; private set; }
+
+    protected override async Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken)
+    {
+        if (request.Method == HttpMethod.Get && request.RequestUri?.AbsolutePath == "/api/tags")
+        {
+            return Ok("""{"models":[{"name":"qwen3.5:9b"},{"name":"llama3.2:3b"}]}""");
+        }
+        if (request.Method == HttpMethod.Post && request.RequestUri?.AbsolutePath == "/api/chat")
+        {
+            SawPost = true;
+            var raw = await request.Content!.ReadAsStringAsync(cancellationToken);
+            using var doc = JsonDocument.Parse(raw);
+            var streaming = doc.RootElement.GetProperty("stream").GetBoolean();
+            ChatModel = doc.RootElement.GetProperty("model").GetString();
+            var messages = doc.RootElement.GetProperty("messages");
+            ChatPrompt = messages[0].GetProperty("content").GetString();
+            if (messages[0].GetProperty("role").GetString() is not ("user" or "system")) throw new Exception("Invalid first role");
+            if (ForceMissingModel) return new HttpResponseMessage(HttpStatusCode.NotFound)
+                { Content = new StringContent("""{"error":"model not found"}""", Encoding.UTF8, "application/json") };
+            if (streaming)
+                return Ok("""{"message":{"content":"Hallo "},"done":false}""" + "\n" +
+                    """{"message":{"content":"Streaming!"},"done":true}""" + "\n");
+            return Ok(ChatReplyOverride ?? """{"message":{"role":"assistant","content":"Hallo! Ich bin lokal."},"done":true}""");
+        }
+        return new HttpResponseMessage(HttpStatusCode.NotFound);
+    }
+
+    private static HttpResponseMessage Ok(string payload) =>
+        new(HttpStatusCode.OK) { Content = new StringContent(payload, Encoding.UTF8, "application/json") };
+}
+
+========== END FILE: tests/Genesis.OllamaSmoke/Program.cs ==========
+
+========== BEGIN FILE: scripts/build-release.ps1 ==========
+GIT-BLOB-SHA: 9c4973446ce5f57473d6dc2e23255f63f8af9351
+$ErrorActionPreference = 'Stop'
+$root = Split-Path $PSScriptRoot -Parent
+$out = Join-Path $root 'dist\JoshuaSpike5Genesis-win-x64'
+$hostOut = Join-Path $out 'Host'
+$uiOut = Join-Path $out 'UI'
+if (-not (Get-Command dotnet -ErrorAction SilentlyContinue)) { throw '.NET SDK ist nicht installiert.' }
+New-Item -ItemType Directory -Force $hostOut, $uiOut | Out-Null
+dotnet publish (Join-Path $root 'src\Genesis.Host\Genesis.Host.csproj') -c Release -r win-x64 --self-contained false -o $hostOut
+if ($LASTEXITCODE -ne 0) { throw 'Host-Build fehlgeschlagen.' }
+dotnet publish (Join-Path $root 'src\Genesis.UI\Genesis.UI.csproj') -c Release -r win-x64 --self-contained false -o $uiOut
+if ($LASTEXITCODE -ne 0) { throw 'UI-Build fehlgeschlagen.' }
+dotnet publish (Join-Path $root 'src\Genesis.Launcher\Genesis.Launcher.csproj') -c Release -r win-x64 --self-contained false -o $out
+if ($LASTEXITCODE -ne 0) { throw 'GUI-Starter-Build fehlgeschlagen.' }
+foreach ($file in @((Join-Path $hostOut 'Genesis.Host.exe'), (Join-Path $uiOut 'Genesis.UI.exe'), (Join-Path $hostOut 'Genesis.Contracts.dll'), (Join-Path $out 'Genesis.Launcher.exe'))) {
+    if (-not (Test-Path $file)) { throw "Build unvollständig: $file" }
+}
+Write-Host "Build fertig: $out"
+Write-Host "Start ohne Konsole: $out\Genesis.Launcher.exe"
+
+========== END FILE: scripts/build-release.ps1 ==========
+
+========== BEGIN FILE: src/Genesis.Launcher/Genesis.Launcher.csproj ==========
+GIT-BLOB-SHA: 54b0b968fa6fdf81bea0632d487431ee025b8643
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net8.0-windows</TargetFramework>
+    <UseWindowsForms>true</UseWindowsForms>
+    <EnableWindowsTargeting>true</EnableWindowsTargeting>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Version>0.3.2</Version><AssemblyVersion>0.3.2.0</AssemblyVersion><FileVersion>0.3.2.0</FileVersion><InformationalVersion>0.3.2-alpha-candidate</InformationalVersion>
+  </PropertyGroup>
+</Project>
+========== END FILE: src/Genesis.Launcher/Genesis.Launcher.csproj ==========
+
+========== BEGIN FILE: src/Genesis.Launcher/Program.cs ==========
+GIT-BLOB-SHA: 54d7a4d494fdafadbbd917e20443553fbeb1c33e
+using System.Diagnostics;
+using System.Windows.Forms;
+
+namespace Genesis.Launcher;
+
+internal static class Program
+{
+    [STAThread]
+    private static void Main()
+    {
+        var ui = Path.Combine(AppContext.BaseDirectory, "UI", "Genesis.UI.exe");
+        if (!File.Exists(ui))
+        {
+            MessageBox.Show("JOSHUA Command Deck fehlt:\n" + ui,
+                "GENESIS · Startfehler", MessageBoxButtons.OK, MessageBoxIcon.Error);
+            return;
+        }
+        try
+        {
+            Process.Start(new ProcessStartInfo(ui)
+            {
+                UseShellExecute = false,
+                CreateNoWindow = true,
+                WorkingDirectory = Path.GetDirectoryName(ui)!
+            });
+        }
+        catch (Exception ex)
+        {
+            MessageBox.Show("JOSHUA konnte nicht gestartet werden:\n" + ex.Message,
+                "GENESIS · Startfehler", MessageBoxButtons.OK, MessageBoxIcon.Error);
+        }
+    }
+}
+========== END FILE: src/Genesis.Launcher/Program.cs ==========
+
+========== BEGIN FILE: docs/GENESIS_0.3.2_STABILITY_ACCEPTANCE.md ==========
+GIT-BLOB-SHA: 14304bcc03b36606c000bbca84cbf162d26607ac
+# PROJECT JOSHUA SPIKE 5.0 GENESIS — 0.3.2 Stability Candidate
+
+**Status:** Review-/Alpha-Kandidat. Kein Produktions-Release. Keine lokale Freigabe vor erfolgreicher Windows-CI und unabhängiger Gegenprüfung.
+
+## Ausgangspunkt
+
+- Basis: GENESIS 0.3.1-R1
+- Basis-Commit: `b36c3555619f2b0df4edba7d703211886004dc25`
+- Ziel: die in den unabhängigen R1-Gutachten bestätigten Restfehler beheben, ohne einen unnötigen Architekturumbau vorzunehmen.
+- Datenbank: weiterhin SQLite-Schema v2; keine destruktive Schemaänderung und kein Downgrade.
+
+## Änderungen gegenüber 0.3.1-R1
+
+1. **Persistenz-Fallback und Fail-Closed**
+   - Kann ein terminaler Chat-Commit nicht gespeichert werden, versucht GENESIS eine gezielte Status-Fallback-Schreiboperation.
+   - Scheitert auch diese, zeigt der In-Memory-Job ausdrücklich `failed` mit Persistenzfehler, statt fälschlich `running` zu bleiben.
+   - Der Host wechselt in einen schreibgeschützten Sicherheitsmodus: Nur Statusabfrage und kontrolliertes Beenden bleiben erlaubt.
+   - Scheitert auch beim Start die Wiederherstellung eines unterbrochenen Chats einschließlich Fallback, bricht der Hoststart ab, statt einen inkonsistenten Zustand zu präsentieren.
+
+2. **Job-Limit und dauerhafte Retention**
+   - Das Limit zählt aktive Jobs (`queued`, `running`, `canceling`), nicht die gesamte historische Datenbank.
+   - Der Laufzeitspeicher und die UI laden die 500 jüngsten abgeschlossenen Jobs plus alle aktiven Jobs.
+   - Ältere abgeschlossene Jobs bleiben vollständig in SQLite erhalten; es gibt keine automatische Löschung historischer Jobdaten.
+   - Der Leseweg lädt nur das begrenzte aktuelle Fenster. Ein Index unterstützt die Status-/Zeit-Suche.
+
+3. **Shutdown-Aufnahmesperre**
+   - Ein autorisierter Stop setzt unter dem State-Lock sofort die Aufnahmesperre.
+   - Bereits verbundene Clients können danach keine neuen Schreib-/Arbeitsaufträge mehr starten.
+   - Der Host beendet sich anschließend kontrolliert und wartet auf aktive Client- und Chat-Tasks.
+
+4. **UI-Senden ohne Timer-Abhängigkeit**
+   - Das Command Deck übernimmt die Job-ID direkt aus der Annahmeantwort.
+   - Ein lokaler In-Flight-Guard verhindert Doppelsenden während der Pipe-Anfrage.
+   - Ein übersprungener Timer-Refresh kann den Senden-Button nicht mehr vorzeitig freigeben.
+   - Status-Polls, die vor einer neueren Chat-Annahme gestartet wurden, dürfen deren aktiven Zustand nicht überschreiben.
+   - Bei vorübergehend nicht erreichbarem Host wird eine bekannte aktive Job-ID nicht voreilig verworfen.
+
+5. **Robuste Streaming-Fortschrittsupdates**
+   - Ein SQLite-Fehler bei einem nicht-terminalen Fortschrittsupdate wird protokolliert; der Ollama-Stream läuft weiter.
+   - Die abschließende Transaktion bleibt maßgeblich. Scheitert diese ebenfalls, greifen Fallback und Fail-Closed.
+
+6. **Vollständiger Beschluss- und Gesprächskontext**
+   - Beschlüsse und Gesprächsrunden werden nur vollständig übernommen; keine Teilstrings mitten im Satz.
+   - Neueste Beschlüsse und jüngste vollständige Gesprächspaare haben Vorrang.
+   - Ausgelassene ältere oder zu große Inhalte werden ausdrücklich im Systemkontext und Statushinweis ausgewiesen.
+   - Zeichenbudgets bleiben Alpha-Grenzen und sind keine echte Tokenzählung.
+
+## Neue Regressionstests
+
+- 505 abgeschlossene Jobs plus ein aktiver Job: Retention bewahrt genau die 500 neuesten abgeschlossenen und den aktiven Job.
+- Neue Chat-Erstellung führt Retention atomar fort; aktive Jobs bleiben erhalten.
+- Beschlusskontext: neueste vollständige Beschlüsse werden übertragen; ältere, nicht passende Beschlüsse werden nicht abgeschnitten und ihre Auslassung wird ausgewiesen.
+- Authentifizierter Host-Stop: neue Chats werden nach gesetzter Aufnahmesperre abgewiesen.
+- Doppelte terminale Persistenzfehler: UI-/Statuszustand bleibt nicht fälschlich `running`; weitere Schreibaktionen werden gesperrt; ein normaler Neustart repariert den offenen Datenbankjob.
+- Test-only injizierter einmaliger Fehler eines nicht-terminalen Fortschrittsupdates während des Ollama-Streams: die Generierung muss weiterlaufen und die finale Antwort erfolgreich gespeichert werden. Das ist ein deterministischer Regressionstest des Fehlerpfads, kein echter Mehrprozess-SQLite-Lock-Benchmark.
+- Bestehende Migration-, Atomic-Create-, Cancel-, Restart-, Pipe-, Quarantäne- und Fake-Ollama-Regressionstests bleiben Bestandteil des Laufs.
+
+Die künstlichen Fehler-Injektionen (terminaler Commit, Fallback und einmaliges Fortschrittsupdate) werden ausschließlich bei aktiviertem Test-Override (`GENESIS_ALLOW_TEST_OVERRIDES=1`) und nur über explizite Testvariablen aktiviert. Sie sind in normaler Ausführung nicht aktiv.
+
+## Abnahme- und Sicherheitsgrenzen
+
+- Vor einem lokalen Test den gesamten Ordner `%LOCALAPPDATA%\\JoshuaSpike5Genesis` bei beendetem Host sichern, einschließlich vorhandener SQLite-WAL-/SHM-Dateien.
+- Keine Kompatibilität mit älteren Hosts nach Schema-Downgrade versprechen.
+- Kein echter Qwen-/Ollama-Lauf auf der RTX 4070 SUPER durch GitHub Actions.
+- Keine interaktive WPF-Abnahme, keine Drei-Monitor-/4K-TV-/Misch-DPI-Abnahme durch CI.
+- Kein mehrstündiger Soak-Test durch CI.
+- Kein unbeaufsichtigter Dauerbetrieb, bevor die manuelle Zielrechner-Abnahme abgeschlossen ist.
+
+## Freigabekriterien
+
+1. Alle Projekte bauen unter Windows x64.
+2. Protokoll- und Ollama-Vertragstests bestehen.
+3. Vollständige Host-Integrationstests bestehen einschließlich der neuen Retention-, Fail-Closed-, Shutdown-, Kontext- und SQLite-Lock-Szenarien.
+4. Das veröffentlichte CI-Artefakt stammt exakt vom geprüften Commit.
+5. Gemini und Meta prüfen denselben vollständigen Quellcode-Snapshot.
+6. Erst danach kontrollierter lokaler Test mit Backup und Beobachtung.
+
+**Ziel:** ein belastbarer, nachvollziehbarer Kern für die nächsten JOSHUA-Meilensteine – nicht ein voreilig als fertig bezeichnetes Produkt.
+
+========== END FILE: docs/GENESIS_0.3.2_STABILITY_ACCEPTANCE.md ==========
