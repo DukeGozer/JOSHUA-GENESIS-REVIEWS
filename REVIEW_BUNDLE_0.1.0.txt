@@ -1,0 +1,357 @@
+JOSHUA SPIKE 5.0 GENESIS — COMPLETE PUBLIC SOURCE REVIEW BUNDLE 0.1.0
+
+SOURCE: https://github.com/DukeGozer/JOSHUA-GENESIS-REVIEWS
+SOURCE STATE: untested initial 0.1.0 snapshot; no Windows build verified.
+WARNING: KNOWN BROKEN PIPE PROTOCOL (pretty-printed JSON + line-oriented framing).
+DO NOT CLAIM TO HAVE TESTED OR EXECUTED THIS PROGRAM.
+
+BUNDLE FILES (11):
+- src/Genesis.Contracts/Genesis.Contracts.csproj | Git blob SHA 88e640c0565951941229dbfd8b29fbb6394dee69
+- src/Genesis.Contracts/Protocol.cs | Git blob SHA 4e3fc132bd6c2f7f38dee41385813e5b846a19ee
+- src/Genesis.Host/Genesis.Host.csproj | Git blob SHA 6d6a47f22bf121906349e51b597df5584f75b2dc
+- src/Genesis.Host/Program.cs | Git blob SHA 938776b56fd6335e4ef003881ae1d2261caa3893
+- src/Genesis.UI/Genesis.UI.csproj | Git blob SHA cb29a992ebd1b655047b9cacffa81713931a277c
+- src/Genesis.UI/App.xaml | Git blob SHA ba4315fefd2e1ca1f6a7b6f43d5479d7ae288eec
+- src/Genesis.UI/App.xaml.cs | Git blob SHA ed4defd41fdbde14e59763217283da30457eb4d1
+- src/Genesis.UI/MainWindow.xaml | Git blob SHA 44528276013e9e3643e1a274c1c265b1d2e0f7c0
+- src/Genesis.UI/MainWindow.xaml.cs | Git blob SHA f57b57975225c8cc104946bf8778b7dff3dbf550
+- scripts/build-release.ps1 | Git blob SHA ebbc3ffd42b6aa6271465b1bfc447c931d83f513
+- .gitignore | Git blob SHA 794dff0b3cf92a8c0c3f37b492498fa9fc085cdb
+
+====== BEGIN SOURCE ======
+
+========== BEGIN FILE: src/Genesis.Contracts/Genesis.Contracts.csproj ==========
+<Project Sdk="Microsoft.NET.Sdk"><PropertyGroup><TargetFramework>net8.0</TargetFramework><Nullable>enable</Nullable><ImplicitUsings>enable</ImplicitUsings></PropertyGroup></Project>
+========== END FILE: src/Genesis.Contracts/Genesis.Contracts.csproj ==========
+
+
+========== BEGIN FILE: src/Genesis.Contracts/Protocol.cs ==========
+using System.Text.Json;
+
+namespace Genesis.Contracts;
+
+public static class Protocol
+{
+    public const string PipeName = "joshua-spike-5-genesis-v1";
+    public static readonly JsonSerializerOptions Json = new(JsonSerializerDefaults.Web) { WriteIndented = true };
+}
+
+public sealed record Request(string Command, string? Text = null, string? Id = null);
+public sealed record Response(bool Success, string Message, Snapshot? Data = null);
+public sealed record Decision(string Id, string Text, DateTimeOffset CreatedAt);
+public sealed record Job(string Id, string Title, string State, int Completed, int Total, DateTimeOffset CreatedAt, string? Error = null);
+public sealed class Snapshot
+{
+    public List<Decision> Decisions { get; set; } = [];
+    public List<Job> Jobs { get; set; } = [];
+    public DateTimeOffset UpdatedAt { get; set; } = DateTimeOffset.UtcNow;
+}
+========== END FILE: src/Genesis.Contracts/Protocol.cs ==========
+
+
+========== BEGIN FILE: src/Genesis.Host/Genesis.Host.csproj ==========
+<Project Sdk="Microsoft.NET.Sdk"><PropertyGroup><OutputType>WinExe</OutputType><TargetFramework>net8.0</TargetFramework><Nullable>enable</Nullable><ImplicitUsings>enable</ImplicitUsings></PropertyGroup><ItemGroup><ProjectReference Include="../Genesis.Contracts/Genesis.Contracts.csproj" /></ItemGroup></Project>
+========== END FILE: src/Genesis.Host/Genesis.Host.csproj ==========
+
+
+========== BEGIN FILE: src/Genesis.Host/Program.cs ==========
+using System.IO.Pipes;
+using System.Text;
+using System.Text.Json;
+using Genesis.Contracts;
+
+namespace Genesis.Host;
+
+internal static class Program
+{
+    private static readonly object Gate = new();
+    private static readonly string DataDirectory = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "JoshuaSpike5Genesis");
+    private static readonly string StatePath = Path.Combine(DataDirectory, "state.json");
+    private static readonly string LogPath = Path.Combine(DataDirectory, "host.log");
+    private static Snapshot _state = new();
+
+    private static async Task Main()
+    {
+        Directory.CreateDirectory(DataDirectory);
+        using var singleton = new FileStream(Path.Combine(DataDirectory, "host.lock"), FileMode.OpenOrCreate, FileAccess.ReadWrite, FileShare.None);
+        try
+        {
+            Load();
+            _ = Task.Run(WorkLoop);
+            while (true)
+            {
+                var server = new NamedPipeServerStream(Protocol.PipeName, PipeDirection.InOut, 10,
+                    PipeTransmissionMode.Byte, PipeOptions.Asynchronous);
+                try { await server.WaitForConnectionAsync(); _ = Task.Run(() => HandleClient(server)); }
+                catch (Exception ex) { server.Dispose(); Log(ex.ToString()); await Task.Delay(300); }
+            }
+        }
+        catch (Exception ex) { Log(ex.ToString()); }
+    }
+
+    private static async Task HandleClient(NamedPipeServerStream pipe)
+    {
+        using (pipe)
+        using (var reader = new StreamReader(pipe, Encoding.UTF8, leaveOpen: true))
+        using (var writer = new StreamWriter(pipe, new UTF8Encoding(false), leaveOpen: true) { AutoFlush = true })
+        {
+            try
+            {
+                var line = await reader.ReadLineAsync();
+                if (line is null) return;
+                var request = JsonSerializer.Deserialize<Request>(line, Protocol.Json);
+                Response response;
+                lock (Gate) response = Execute(request);
+                await writer.WriteLineAsync(JsonSerializer.Serialize(response, Protocol.Json));
+            }
+            catch (Exception ex)
+            {
+                Log(ex.ToString());
+                try { await writer.WriteLineAsync(JsonSerializer.Serialize(new Response(false, "Anfrage fehlgeschlagen. Details in host.log."), Protocol.Json)); }
+                catch { /* client disconnected */ }
+            }
+        }
+    }
+
+    private static Response Execute(Request? request)
+    {
+        if (request is null) return new(false, "Leere Anfrage");
+        switch (request.Command.ToLowerInvariant())
+        {
+            case "status": return new(true, "GENESIS Host erreichbar", Clone());
+            case "remember":
+                if (string.IsNullOrWhiteSpace(request.Text)) return new(false, "Bitte Beschlusstext angeben.");
+                _state.Decisions.Add(new Decision(Guid.NewGuid().ToString("N"), request.Text.Trim(), DateTimeOffset.UtcNow));
+                Save(); return new(true, "Beschluss dauerhaft gespeichert.", Clone());
+            case "start-demo":
+                var job = new Job(Guid.NewGuid().ToString("N"), "SPIKE-Testauftrag: 10 Verarbeitungsschritte", "queued", 0, 10, DateTimeOffset.UtcNow);
+                _state.Jobs.Add(job); Save(); return new(true, "Testauftrag gestartet.", Clone());
+            case "cancel":
+                var index = _state.Jobs.FindIndex(x => x.Id == request.Id);
+                if (index < 0) return new(false, "Auftrag nicht gefunden.");
+                if (_state.Jobs[index].State is "done" or "canceled") return new(false, "Auftrag bereits beendet.");
+                _state.Jobs[index] = _state.Jobs[index] with { State = "canceled" };
+                Save(); return new(true, "Auftrag abgebrochen.", Clone());
+            default: return new(false, "Unbekannter Befehl.");
+        }
+    }
+
+    private static async Task WorkLoop()
+    {
+        while (true)
+        {
+            await Task.Delay(1000);
+            try
+            {
+                lock (Gate)
+                {
+                    var index = _state.Jobs.FindIndex(x => x.State is "queued" or "running");
+                    if (index < 0) continue;
+                    var job = _state.Jobs[index];
+                    var next = Math.Min(job.Total, job.Completed + 1);
+                    _state.Jobs[index] = job with { State = next == job.Total ? "done" : "running", Completed = next };
+                    Save();
+                }
+            }
+            catch (Exception ex) { Log(ex.ToString()); }
+        }
+    }
+
+    private static Snapshot Clone() => new()
+    {
+        Decisions = [.. _state.Decisions], Jobs = [.. _state.Jobs], UpdatedAt = _state.UpdatedAt
+    };
+
+    private static void Load()
+    {
+        if (!File.Exists(StatePath)) return;
+        try { _state = JsonSerializer.Deserialize<Snapshot>(File.ReadAllText(StatePath), Protocol.Json) ?? new Snapshot(); }
+        catch (Exception ex)
+        {
+            Log("Zustand nicht lesbar; keine Daten überschrieben: " + ex);
+            throw; // fail closed; don't replace corrupted state with empty state
+        }
+    }
+
+    private static void Save()
+    {
+        _state.UpdatedAt = DateTimeOffset.UtcNow;
+        var temp = StatePath + ".tmp";
+        File.WriteAllText(temp, JsonSerializer.Serialize(_state, Protocol.Json), new UTF8Encoding(false));
+        File.Move(temp, StatePath, overwrite: true);
+    }
+
+    private static void Log(string line)
+    {
+        try { lock (Gate) File.AppendAllText(LogPath, $"{DateTimeOffset.UtcNow:u} {line}{Environment.NewLine}"); }
+        catch { }
+    }
+}
+========== END FILE: src/Genesis.Host/Program.cs ==========
+
+
+========== BEGIN FILE: src/Genesis.UI/Genesis.UI.csproj ==========
+<Project Sdk="Microsoft.NET.Sdk"><PropertyGroup><OutputType>WinExe</OutputType><TargetFramework>net8.0-windows</TargetFramework><UseWPF>true</UseWPF><EnableWindowsTargeting>true</EnableWindowsTargeting><Nullable>enable</Nullable><ImplicitUsings>enable</ImplicitUsings></PropertyGroup><ItemGroup><ProjectReference Include="../Genesis.Contracts/Genesis.Contracts.csproj" /></ItemGroup></Project>
+========== END FILE: src/Genesis.UI/Genesis.UI.csproj ==========
+
+
+========== BEGIN FILE: src/Genesis.UI/App.xaml ==========
+<Application x:Class="Genesis.UI.App" xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation" xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml" StartupUri="MainWindow.xaml"><Application.Resources /></Application>
+========== END FILE: src/Genesis.UI/App.xaml ==========
+
+
+========== BEGIN FILE: src/Genesis.UI/App.xaml.cs ==========
+using System.Windows;
+namespace Genesis.UI;
+public partial class App : Application { }
+========== END FILE: src/Genesis.UI/App.xaml.cs ==========
+
+
+========== BEGIN FILE: src/Genesis.UI/MainWindow.xaml ==========
+<Window x:Class="Genesis.UI.MainWindow" xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation" xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml" Title="JOSHUA SPIKE 5.0 · GENESIS" Width="850" Height="640" MinWidth="600" MinHeight="440" Background="#E9EFF3" FontFamily="Segoe UI">
+  <Grid Margin="22"><Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/><RowDefinition Height="*"/><RowDefinition Height="Auto"/></Grid.RowDefinitions>
+    <StackPanel Grid.Row="0" Margin="0,0,0,18"><TextBlock Text="JOSHUA SPIKE 5.0" FontSize="27" FontWeight="SemiBold" Foreground="#163D54"/><TextBlock Text="GENESIS · unabhängiger Hintergrundkern · funktionaler SPIKE-Prototyp" Foreground="#496A7C" FontSize="13"/></StackPanel>
+    <StackPanel Grid.Row="1" Orientation="Horizontal" Margin="0,0,0,14"><Button x:Name="StartJob" Content="10-Schritte-Test starten" Click="StartJob_Click" Padding="15,9" Margin="0,0,10,0"/><Button Content="Aktualisieren" Click="Refresh_Click" Padding="15,9"/><TextBlock x:Name="ConnectionText" Margin="14,10,0,0" Foreground="#245C68"/></StackPanel>
+    <Grid Grid.Row="2"><Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
+      <GroupBox Header="Dauerhafte Beschlüsse" Margin="0,0,9,0" Padding="10"><ListBox x:Name="DecisionsList" BorderThickness="0" Background="Transparent" TextBlock.TextWrapping="Wrap"/></GroupBox>
+      <GroupBox Grid.Column="1" Header="Persistente Aufträge" Margin="9,0,0,0" Padding="10"><ListBox x:Name="JobsList" BorderThickness="0" Background="Transparent"/></GroupBox>
+    </Grid>
+    <Grid Grid.Row="3" Margin="0,16,0,0"><Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions><TextBox x:Name="DecisionInput" VerticalContentAlignment="Center" Padding="10" MinHeight="39" ToolTip="Beschluss eingeben – keine KI-Erkennung in dieser SPIKE-Version"/><Button Grid.Column="1" Content="Beschluss speichern" Click="Remember_Click" Padding="14,9" Margin="10,0,0,0"/></Grid>
+  </Grid>
+</Window>
+========== END FILE: src/Genesis.UI/MainWindow.xaml ==========
+
+
+========== BEGIN FILE: src/Genesis.UI/MainWindow.xaml.cs ==========
+using System.Diagnostics;
+using System.IO;
+using System.IO.Pipes;
+using System.Text;
+using System.Text.Json;
+using System.Windows;
+using System.Windows.Threading;
+using Genesis.Contracts;
+
+namespace Genesis.UI;
+
+public partial class MainWindow : Window
+{
+    private readonly DispatcherTimer _timer = new() { Interval = TimeSpan.FromSeconds(1) };
+    private bool _refreshing;
+
+    public MainWindow()
+    {
+        InitializeComponent();
+        Loaded += async (_, _) => { await EnsureHostAsync(); await RefreshAsync(); _timer.Start(); };
+        Closed += (_, _) => _timer.Stop();
+        _timer.Tick += async (_, _) => await RefreshAsync();
+    }
+
+    private static async Task<Response> SendAsync(Request request)
+    {
+        using var pipe = new NamedPipeClientStream(".", Protocol.PipeName, PipeDirection.InOut, PipeOptions.Asynchronous);
+        await pipe.ConnectAsync(1500);
+        using var writer = new StreamWriter(pipe, new UTF8Encoding(false), leaveOpen: true) { AutoFlush = true };
+        using var reader = new StreamReader(pipe, Encoding.UTF8, leaveOpen: true);
+        await writer.WriteLineAsync(JsonSerializer.Serialize(request, Protocol.Json));
+        var reply = await reader.ReadLineAsync();
+        return reply is null ? new(false, "Keine Antwort vom Host") : JsonSerializer.Deserialize<Response>(reply, Protocol.Json) ?? new(false, "Ungültige Antwort");
+    }
+
+    private static async Task EnsureHostAsync()
+    {
+        try { await SendAsync(new Request("status")); return; } catch { }
+        var path = Path.Combine(AppContext.BaseDirectory, "Genesis.Host.exe");
+        if (!File.Exists(path)) return;
+        Process.Start(new ProcessStartInfo(path) { UseShellExecute = false, CreateNoWindow = true });
+        for (var i = 0; i < 15; i++)
+        {
+            await Task.Delay(200);
+            try { await SendAsync(new Request("status")); return; } catch { }
+        }
+    }
+
+    private async Task RefreshAsync()
+    {
+        if (_refreshing) return;
+        _refreshing = true;
+        try
+        {
+            var response = await SendAsync(new Request("status"));
+            ConnectionText.Text = response.Success ? "● Host verbunden" : response.Message;
+            if (response.Data is { } data)
+            {
+                DecisionsList.ItemsSource = data.Decisions.OrderByDescending(x => x.CreatedAt)
+                    .Select(x => $"{x.CreatedAt.LocalDateTime:g}  {x.Text}").ToArray();
+                JobsList.ItemsSource = data.Jobs.OrderByDescending(x => x.CreatedAt)
+                    .Select(x => $"{x.Title}\n{x.State} – {x.Completed}/{x.Total}  ·  {x.Id[..8]}").ToArray();
+            }
+        }
+        catch { ConnectionText.Text = "○ Host nicht erreichbar – Log prüfen"; }
+        finally { _refreshing = false; }
+    }
+
+    private async void StartJob_Click(object sender, RoutedEventArgs e)
+    {
+        try { var result = await SendAsync(new Request("start-demo")); if (!result.Success) MessageBox.Show(result.Message); await RefreshAsync(); }
+        catch (Exception ex) { MessageBox.Show(ex.Message, "Verbindungsfehler"); }
+    }
+
+    private async void Remember_Click(object sender, RoutedEventArgs e)
+    {
+        if (string.IsNullOrWhiteSpace(DecisionInput.Text)) return;
+        try
+        {
+            var result = await SendAsync(new Request("remember", DecisionInput.Text));
+            if (result.Success) DecisionInput.Clear(); else MessageBox.Show(result.Message);
+            await RefreshAsync();
+        }
+        catch (Exception ex) { MessageBox.Show(ex.Message, "Verbindungsfehler"); }
+    }
+
+    private async void Refresh_Click(object sender, RoutedEventArgs e) => await RefreshAsync();
+}
+========== END FILE: src/Genesis.UI/MainWindow.xaml.cs ==========
+
+
+========== BEGIN FILE: scripts/build-release.ps1 ==========
+$ErrorActionPreference = 'Stop'
+$root = Split-Path $PSScriptRoot -Parent
+$out = Join-Path $root 'dist\JoshuaSpike5Genesis-win-x64'
+New-Item -ItemType Directory -Force $out | Out-Null
+dotnet publish (Join-Path $root 'src\Genesis.Host\Genesis.Host.csproj') -c Release -r win-x64 --self-contained false -o $out
+dotnet publish (Join-Path $root 'src\Genesis.UI\Genesis.UI.csproj') -c Release -r win-x64 --self-contained false -o $out
+Write-Host "Build fertig: $out"
+Write-Host 'Start: Genesis.UI.exe (Host wird bei Bedarf gestartet).'
+========== END FILE: scripts/build-release.ps1 ==========
+
+
+========== BEGIN FILE: .gitignore ==========
+# .NET build output
+**/bin/
+**/obj/
+dist/
+artifacts/
+.vs/
+*.user
+*.suo
+
+# Runtime and private content
+state.json
+state.json.*
+host.log
+*.log
+.env
+.env.*
+*.pfx
+*.key
+*.pem
+secrets.*
+F_JOSHUA_DATA/
+THE_HIVE/
+models/
+datasets/
+
+========== END FILE: .gitignore ==========
+
+====== END SOURCE ======
