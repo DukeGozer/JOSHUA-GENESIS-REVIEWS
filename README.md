@@ -1,22 +1,21 @@
-# JOSHUA GENESIS — Public Expert Review
+# JOSHUA GENESIS — Public Expert Review Repository
 
-**Public review-only repository for PROJECT JOSHUA SPIKE 5.0 GENESIS.**
+The private development repository remains private. This public repository contains **selected source-code snapshots** exclusively for independent review by Gemini, Meta and other reviewers.
 
-## Source snapshot
+## Latest code review candidate: 0.1.1
 
-The **new GENESIS 0.1.0 source files are now publicly available** under `src/` and `scripts/`. These files were copied from the separate private development repository for external review; they are **not** an approved release.
+- **[Complete source bundle (one TXT file)](REVIEW_BUNDLE_0.1.1.txt)** — 17 C#/XAML/project/test/build files with original paths and blob SHA values.
+- **[Reviewer instructions and verified CI evidence](REVIEW_0.1.1.md)** — successful Windows build, IPC and lifecycle integration tests.
 
-Some browser-based AI reviewers could open this README but not nested source paths. For those reviewers, **use the single root-level text file**:
+## Previous baseline: 0.1.0
 
-**[REVIEW_BUNDLE_0.1.0.txt](REVIEW_BUNDLE_0.1.0.txt)**
+- [Original complete source bundle](REVIEW_BUNDLE_0.1.0.txt)
+- [Original review instructions](REVIEW_0.1.0.md)
 
-It contains the source files with path markers and their Git blob SHAs. The authoritative separate review brief is **[REVIEW_0.1.0.md](REVIEW_0.1.0.md)**.
+## Important
 
-## Status / safeguards
+Both versions are experimental GENESIS SPIKE code, **not a finished AI assistant or production installer**. Passing Windows CI does not establish real-world readiness, security or hardware/UX compatibility. The 0.1.1 source needs independent expert review before approval.
 
-- **UNTESTED 0.1.0 SPIKE. DO NOT INSTALL AS A VERIFIED RELEASE.**
-- Known P0: indented JSON over a line-oriented Named Pipe protocol.
-- No successful Windows build or run test has been demonstrated.
-- No historical JOSHUA NEXT/R57 source code, local/private data, credentials or models are intentionally included.
-- The private development repository remains private.
-- Public access grants read/copy access to these specific published files; it does not grant commit permissions.
+No historical JOSHUA NEXT/R57 code, local HIVE data, secrets, credentials, personal files or models should be published here.
+
+Public read access does **not** grant commit access to the private repository.
