@@ -1,21 +1,15 @@
-# JOSHUA GENESIS — Public Expert Review Repository
+# JOSHUA GENESIS – öffentliche Expertenprüfung
 
-The private development repository remains private. This public repository contains **selected source-code snapshots** exclusively for independent review by Gemini, Meta and other reviewers.
+## Aktueller Entwicklungsstand: GENESIS 0.3.0
 
-## Latest code review candidate: 0.1.1
+- [**Gesamter Quellcode als eine TXT-Datei (22 Dateien)**](REVIEW_BUNDLE_0.3.0.txt)
+- [**Prüfauftrag für Gemini und Meta**](REVIEW_0.3.0.md)
 
-- **[Complete source bundle (one TXT file)](REVIEW_BUNDLE_0.1.1.txt)** — 17 C#/XAML/project/test/build files with original paths and blob SHA values.
-- **[Reviewer instructions and verified CI evidence](REVIEW_0.1.1.md)** — successful Windows build, IPC and lifecycle integration tests.
+Der Quellcode umfasst das neue SQLite-Fundament (0.2.0), das WPF Command Deck und den ersten lokalen Ollama-Chat (0.3.0). Der exakte Quellcommit hat einen **erfolgreichen automatischen Windows-Build** durchlaufen; Ollama wurde dabei nur über einen simulierten HTTP-Server geprüft. **Keine produktionsreife Freigabe.**
 
-## Previous baseline: 0.1.0
+## Frühere Reviewstände
 
-- [Original complete source bundle](REVIEW_BUNDLE_0.1.0.txt)
-- [Original review instructions](REVIEW_0.1.0.md)
+- [GENESIS 0.1.1 – Quellcode](REVIEW_BUNDLE_0.1.1.txt) · [Prüfauftrag](REVIEW_0.1.1.md)
+- [GENESIS 0.1.0 – Quellcode](REVIEW_BUNDLE_0.1.0.txt) · [Prüfauftrag](REVIEW_0.1.0.md)
 
-## Important
-
-Both versions are experimental GENESIS SPIKE code, **not a finished AI assistant or production installer**. Passing Windows CI does not establish real-world readiness, security or hardware/UX compatibility. The 0.1.1 source needs independent expert review before approval.
-
-No historical JOSHUA NEXT/R57 code, local HIVE data, secrets, credentials, personal files or models should be published here.
-
-Public read access does **not** grant commit access to the private repository.
+Das private Entwicklungsrepository bleibt privat. Dieses öffentliche Repository enthält nur bewusst bereitgestellte Quellcode-Kopien, keine alten JOSHUA NEXT/R57-Bestände oder privaten Nutzerdaten.
