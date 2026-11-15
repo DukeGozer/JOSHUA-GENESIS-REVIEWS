@@ -1,11 +1,18 @@
 # JOSHUA GENESIS – öffentliche Expertenprüfung
 
-## Neueste Expertenprüfung: GENESIS 0.3.1 Alpha-Kandidat
+## Neueste Expertenprüfung: GENESIS 0.3.1-R1
 
-- [**Komplettes Quellcodepaket (25 Dateien, eine TXT)**](REVIEW_BUNDLE_0.3.1_ALPHA.txt)
-- [**Neuer Prüfauftrag für Gemini und Meta**](REVIEW_0.3.1_ALPHA.md)
+- [**Vollständiges R1-Quellcodepaket (25 Dateien, eine TXT)**](REVIEW_BUNDLE_0.3.1_R1.txt)
+- [**Neuer Prüfauftrag für Gemini und Meta**](REVIEW_0.3.1_R1.md)
 
-Prüfstand `0857242bcc40e6e8354c841b556fed59ef629288`, Windows CI **43764447303: success**. Enthält Chat-Hintergrundaufträge, SQLite-V2-Gesprächsverlauf, GPU-Exklusivität, Streaming, Abbruch und Root-GUI-Starter. **Noch keine reale Ollama/Qwen- oder interaktive Windows-Abnahme.**
+Exakter Quellcommit `b36c3555619f2b0df4edba7d703211886004dc25`; Windows-CI **43771075211: success** (UI, Host, Protokoll, Ollama-Vertrag, Paketlayout und End-to-End-Integration). Neuer Draft-PR [#7](https://github.com/DukeGozer/JOSHUA-SPIKE-5-GENESIS/pull/7), noch nicht gemergt. R1 ergänzt atomare Chatpersistenz, wiederholbare SQLite-Migration, ehrlichen Abbruchstatus, Wiederherstellung nach Host-Absturz, Quarantäne bei SQLite-Korruption, begrenzten vollständigen Gesprächskontext und UI-Stabilisierung.
+
+**Noch keine reale Ollama/Qwen-GPU- oder interaktive WPF-/Mehrmonitor-Abnahme.** Nicht produktionsfreigegeben.
+
+## Vorheriger Reviewstand: GENESIS 0.3.1 Alpha-Kandidat
+
+- [**Quellcodepaket (25 Dateien)**](REVIEW_BUNDLE_0.3.1_ALPHA.txt)
+- [**Prüfauftrag**](REVIEW_0.3.1_ALPHA.md)
 
 ## Vorheriger Reviewstand 0.3.0-R1
 
