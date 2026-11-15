@@ -1,0 +1,661 @@
+
+========== BEGIN FILE: .github/workflows/windows-build.yml ==========
+GIT-BLOB-SHA: d4c418579e47fc69d8671767c2e2ef1716cdfed9
+name: Windows build
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  windows-build:
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Install .NET 8 SDK
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '8.0.x'
+      - name: Build Genesis UI
+        if: hashFiles('src/Genesis.UI/Genesis.UI.csproj') != ''
+        shell: pwsh
+        run: dotnet build src/Genesis.UI/Genesis.UI.csproj --configuration Release --nologo
+      - name: Build Genesis Host
+        if: hashFiles('src/Genesis.Host/Genesis.Host.csproj') != ''
+        shell: pwsh
+        run: dotnet build src/Genesis.Host/Genesis.Host.csproj --configuration Release --nologo
+      - name: Protocol roundtrip smoke test
+        shell: pwsh
+        run: dotnet run --project tests/Genesis.ProtocolSmoke/Genesis.ProtocolSmoke.csproj --configuration Release --no-launch-profile
+      - name: Ollama API contract smoke test
+        shell: pwsh
+        run: dotnet run --project tests/Genesis.OllamaSmoke/Genesis.OllamaSmoke.csproj --configuration Release --no-launch-profile
+      - name: Package layout verification
+        shell: pwsh
+        run: pwsh -NoProfile -File scripts/build-release.ps1
+      - name: End-to-end Windows host integration
+        shell: pwsh
+        run: dotnet run --project tests/Genesis.IntegrationSmoke/Genesis.IntegrationSmoke.csproj --configuration Release --no-launch-profile -- "dist/JoshuaSpike5Genesis-win-x64/Host/Genesis.Host.exe"
+      - name: Upload Windows build artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: GENESIS-0.3.1-win-x64-UNREVIEWED
+          path: dist/JoshuaSpike5Genesis-win-x64/
+          retention-days: 7
+          if-no-files-found: error
+
+========== END FILE: .github/workflows/windows-build.yml ==========
+
+========== BEGIN FILE: scripts/build-release.ps1 ==========
+GIT-BLOB-SHA: 9c4973446ce5f57473d6dc2e23255f63f8af9351
+$ErrorActionPreference = 'Stop'
+$root = Split-Path $PSScriptRoot -Parent
+$out = Join-Path $root 'dist\JoshuaSpike5Genesis-win-x64'
+$hostOut = Join-Path $out 'Host'
+$uiOut = Join-Path $out 'UI'
+if (-not (Get-Command dotnet -ErrorAction SilentlyContinue)) { throw '.NET SDK ist nicht installiert.' }
+New-Item -ItemType Directory -Force $hostOut, $uiOut | Out-Null
+dotnet publish (Join-Path $root 'src\Genesis.Host\Genesis.Host.csproj') -c Release -r win-x64 --self-contained false -o $hostOut
+if ($LASTEXITCODE -ne 0) { throw 'Host-Build fehlgeschlagen.' }
+dotnet publish (Join-Path $root 'src\Genesis.UI\Genesis.UI.csproj') -c Release -r win-x64 --self-contained false -o $uiOut
+if ($LASTEXITCODE -ne 0) { throw 'UI-Build fehlgeschlagen.' }
+dotnet publish (Join-Path $root 'src\Genesis.Launcher\Genesis.Launcher.csproj') -c Release -r win-x64 --self-contained false -o $out
+if ($LASTEXITCODE -ne 0) { throw 'GUI-Starter-Build fehlgeschlagen.' }
+foreach ($file in @((Join-Path $hostOut 'Genesis.Host.exe'), (Join-Path $uiOut 'Genesis.UI.exe'), (Join-Path $hostOut 'Genesis.Contracts.dll'), (Join-Path $out 'Genesis.Launcher.exe'))) {
+    if (-not (Test-Path $file)) { throw "Build unvollständig: $file" }
+}
+Write-Host "Build fertig: $out"
+Write-Host "Start ohne Konsole: $out\Genesis.Launcher.exe"
+
+========== END FILE: scripts/build-release.ps1 ==========
+
+========== BEGIN FILE: src/Genesis.Contracts/Genesis.Contracts.csproj ==========
+GIT-BLOB-SHA: c83c20e513d0b35d4052c9ed64def5702b9a7f09
+<Project Sdk="Microsoft.NET.Sdk"><PropertyGroup><Version>0.3.1</Version><AssemblyVersion>0.3.1.0</AssemblyVersion><FileVersion>0.3.1.0</FileVersion><InformationalVersion>0.3.1-review-candidate</InformationalVersion><TargetFramework>net8.0</TargetFramework><Nullable>enable</Nullable><ImplicitUsings>enable</ImplicitUsings></PropertyGroup></Project>
+========== END FILE: src/Genesis.Contracts/Genesis.Contracts.csproj ==========
+
+========== BEGIN FILE: src/Genesis.Contracts/Protocol.cs ==========
+GIT-BLOB-SHA: 7ee6f703dfa9683ecc0c32eb7727b5c5e9bd5cb5
+using System.Text.Json;
+
+namespace Genesis.Contracts;
+
+public static class Protocol
+{
+    public const string PipeName = "joshua-spike-5-genesis-v1";
+    public static bool TestOverridesEnabled => Environment.GetEnvironmentVariable("GENESIS_ALLOW_TEST_OVERRIDES") == "1";
+    public static string ActivePipeName => TestOverridesEnabled
+        ? Environment.GetEnvironmentVariable("GENESIS_PIPE_NAME") ?? PipeName : PipeName;
+    public static readonly JsonSerializerOptions Json = new(JsonSerializerDefaults.Web) { WriteIndented = true };
+    public static readonly JsonSerializerOptions WireJson = new(JsonSerializerDefaults.Web) { WriteIndented = false };
+}
+
+public sealed record Request(string Command, string? Text = null, string? Id = null, string? AuthToken = null, string? Model = null);
+public sealed record Response(bool Success, string Message, Snapshot? Data = null, string[]? Models = null, string? ChatText = null);
+public sealed record Decision(string Id, string Text, DateTimeOffset CreatedAt);
+public sealed record Job(string Id, string Title, string State, int Completed, int Total, DateTimeOffset CreatedAt, string? Error = null, string Kind = "demo", string? Model = null, string? Prompt = null, string? Result = null);
+public sealed record ChatMessage(string Id, string Session, string Role, string Text, string? Model, DateTimeOffset CreatedAt);
+public sealed class Snapshot
+{
+    public int SchemaVersion { get; set; } = 1;
+    public List<Decision> Decisions { get; set; } = [];
+    public List<Job> Jobs { get; set; } = [];
+    public List<ChatMessage> ChatMessages { get; set; } = [];
+    public DateTimeOffset UpdatedAt { get; set; } = DateTimeOffset.UtcNow;
+}
+========== END FILE: src/Genesis.Contracts/Protocol.cs ==========
+
+========== BEGIN FILE: src/Genesis.Host/Genesis.Host.csproj ==========
+GIT-BLOB-SHA: a1a5efb7382683eb37aa8357ea0b801ff590252e
+<Project Sdk="Microsoft.NET.Sdk"><PropertyGroup><Version>0.3.1</Version><AssemblyVersion>0.3.1.0</AssemblyVersion><FileVersion>0.3.1.0</FileVersion><InformationalVersion>0.3.1-review-candidate</InformationalVersion><OutputType>WinExe</OutputType><TargetFramework>net8.0</TargetFramework><Nullable>enable</Nullable><ImplicitUsings>enable</ImplicitUsings></PropertyGroup><ItemGroup><ProjectReference Include="../Genesis.Contracts/Genesis.Contracts.csproj" /><ProjectReference Include="../Genesis.Storage/Genesis.Storage.csproj" /><ProjectReference Include="../Genesis.Ollama/Genesis.Ollama.csproj" /></ItemGroup></Project>
+========== END FILE: src/Genesis.Host/Genesis.Host.csproj ==========
+
+========== BEGIN FILE: src/Genesis.Host/Program.cs ==========
+GIT-BLOB-SHA: 9499bfbaf3950f5c8e52ee02f4fe386293bb2133
+using System.IO.Pipes;
+using System.Text;
+using System.Text.Json;
+using Genesis.Contracts;
+using Genesis.Storage;
+using Genesis.Ollama;
+
+namespace Genesis.Host;
+
+internal static class Program
+{
+    private static readonly object StateGate = new();
+    private static readonly object LogGate = new();
+    private static readonly CancellationTokenSource StopSignal = new();
+    private static readonly string DataDirectory = (Protocol.TestOverridesEnabled
+        ? Environment.GetEnvironmentVariable("GENESIS_DATA_DIR") : null)
+        ?? Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "JoshuaSpike5Genesis");
+    private static readonly string StatePath = Path.Combine(DataDirectory, "state.json");
+    private static readonly string BackupPath = StatePath + ".bak";
+    private static readonly string LogPath = Path.Combine(DataDirectory, "host.log");
+    private static readonly string ControlTokenPath = Path.Combine(DataDirectory, "control.token");
+    private static string _controlToken = "";
+    private static Snapshot _state = new();
+    private static SnapshotStore? _store;
+    private static readonly OllamaClient LocalModel = CreateLocalModel();
+    private static OllamaClient CreateLocalModel()
+    {
+        // Injection is for isolated Windows CI only; production remains fixed to loopback.
+        var endpoint = Protocol.TestOverridesEnabled
+            ? Environment.GetEnvironmentVariable("GENESIS_OLLAMA_URL") : null;
+        if (string.IsNullOrWhiteSpace(endpoint)) return new OllamaClient();
+        if (!Uri.TryCreate(endpoint, UriKind.Absolute, out var uri) || !uri.IsLoopback || uri.Scheme != "http")
+            throw new InvalidOperationException("GENESIS_OLLAMA_URL must be an HTTP loopback address.");
+        return new OllamaClient(new HttpClient { BaseAddress = uri, Timeout = TimeSpan.FromMinutes(3) });
+    }
+    private static readonly SemaphoreSlim ModelGate = new(1, 1);
+    private static readonly SemaphoreSlim ModelListGate = new(2, 2);
+    private static readonly Dictionary<string, CancellationTokenSource> ChatCancels = new();
+    private static readonly List<Task> ChatTasks = new();
+    private static string _startupNotice = "GENESIS Host erreichbar";
+    private const int MaxRequestChars = 64 * 1024;
+    private const int MaxStoredEntries = 500;
+    private const long MaxLogBytes = 1024 * 1024;
+
+    private static async Task<int> Main()
+    {
+        Directory.CreateDirectory(DataDirectory);
+        try
+        {
+            using var singleton = new FileStream(Path.Combine(DataDirectory, "host.lock"),
+                FileMode.OpenOrCreate, FileAccess.ReadWrite, FileShare.None);
+            LoadFromStorage();
+            // Capability token prevents accidental or blind stop requests, not malicious same-user processes.
+            _controlToken = Convert.ToHexString(System.Security.Cryptography.RandomNumberGenerator.GetBytes(32));
+            var tokenTemp = ControlTokenPath + ".tmp";
+            File.WriteAllText(tokenTemp, _controlToken, new UTF8Encoding(false));
+            File.Move(tokenTemp, ControlTokenPath, overwrite: true);
+            Log("GENESIS " + typeof(Program).Assembly.GetName().Version + " Host started.");
+            var worker = Task.Run(() => WorkLoop(StopSignal.Token));
+            var clientSlots = new SemaphoreSlim(16, 16);
+            var activeClients = new List<Task>();
+            try
+            {
+                while (!StopSignal.IsCancellationRequested)
+                {
+                    await clientSlots.WaitAsync(StopSignal.Token).ConfigureAwait(false);
+                    NamedPipeServerStream? server = null;
+                    try
+                    {
+                        server = new NamedPipeServerStream(Protocol.ActivePipeName,
+                            PipeDirection.InOut, 16, PipeTransmissionMode.Byte,
+                            PipeOptions.Asynchronous | PipeOptions.CurrentUserOnly);
+                        await server.WaitForConnectionAsync(StopSignal.Token);
+                        // The task owns the connected pipe and releases its concurrency slot.
+                        var connected = server;
+                        server = null;
+                        var task = ProcessClientAsync(connected, StopSignal.Token, clientSlots);
+                        activeClients.Add(task);
+                        activeClients.RemoveAll(t => t.IsCompleted);
+                    }
+                    catch (OperationCanceledException) when (StopSignal.IsCancellationRequested)
+                    {
+                        server?.Dispose();
+                        clientSlots.Release();
+                        break;
+                    }
+                    catch (Exception ex)
+                    {
+                        server?.Dispose();
+                        clientSlots.Release();
+                        Log("Pipe accept error: " + ex);
+                        await Task.Delay(200, StopSignal.Token);
+                    }
+                }
+            }
+            catch (OperationCanceledException) when (StopSignal.IsCancellationRequested) { }
+            finally
+            {
+                StopSignal.Cancel();
+                try { await Task.WhenAll(activeClients); }
+                catch (Exception ex) { Log("Client shutdown error: " + ex); }
+                try { await worker; } catch (OperationCanceledException) { }
+                Task[] chatTasks;
+                lock (StateGate) chatTasks = ChatTasks.ToArray();
+                try { await Task.WhenAll(chatTasks); }
+                catch (Exception ex) { Log("Chat shutdown error: " + ex); }
+                clientSlots.Dispose();
+                _store?.Dispose();
+                try { File.Delete(ControlTokenPath); } catch (IOException ex) { Log("Could not delete control token: " + ex.Message); }
+                Log("GENESIS host stopped.");
+            }
+            return 0;
+        }
+        catch (IOException ex) { Log("Host lock unavailable (possibly already running): " + ex.Message); return 2; }
+        catch (Exception ex) { Log("Host startup failed: " + ex); return 1; }
+    }
+
+    private static async Task ProcessClientAsync(
+        NamedPipeServerStream pipe, CancellationToken stopping, SemaphoreSlim slots)
+    {
+        try
+        {
+            using (pipe) await HandleClient(pipe, stopping);
+        }
+        catch (Exception ex) { Log("Unhandled client error: " + ex); }
+        finally { slots.Release(); }
+    }
+
+    private static async Task HandleClient(NamedPipeServerStream pipe, CancellationToken stopping)
+    {
+        // Handle one request per connection; every read has a deadline and size bound.
+        using var reader = new StreamReader(pipe, Encoding.UTF8, detectEncodingFromByteOrderMarks: false, leaveOpen: true);
+        using var writer = new StreamWriter(pipe, new UTF8Encoding(false), leaveOpen: true) { AutoFlush = true };
+        try
+        {
+            using var timeout = CancellationTokenSource.CreateLinkedTokenSource(stopping);
+            timeout.CancelAfter(TimeSpan.FromSeconds(10));
+            var line = await PipeLineCodec.ReadBoundedAsync(reader, MaxRequestChars, timeout.Token);
+            if (line is null) return;
+            Request? request;
+            try { request = JsonSerializer.Deserialize<Request>(line, Protocol.WireJson); }
+            catch (JsonException)
+            {
+                await writer.WriteLineAsync(JsonSerializer.Serialize(
+                    new Response(false, "Ungültiges JSON."), Protocol.WireJson));
+                return;
+            }
+
+            // Only model discovery waits on its connection; chat is now a background job.
+            if (request?.Command?.Equals("models", StringComparison.OrdinalIgnoreCase) == true)
+            {
+                if (!ModelListGate.Wait(0))
+                {
+                    await writer.WriteLineAsync(JsonSerializer.Serialize(
+                        new Response(false, "Modellabfrage ausgelastet."), Protocol.WireJson));
+                    return;
+                }
+                try
+                {
+                    using var modelTimeout = CancellationTokenSource.CreateLinkedTokenSource(stopping);
+                    modelTimeout.CancelAfter(TimeSpan.FromSeconds(10));
+                    var modelResponse = await HandleModelRequestAsync(request, modelTimeout.Token);
+                    await writer.WriteLineAsync(JsonSerializer.Serialize(modelResponse, Protocol.WireJson));
+                }
+                finally { ModelListGate.Release(); }
+                return;
+            }
+
+            Response response;
+            lock (StateGate)
+            {
+                try { response = Execute(request); }
+                catch (IOException ex) { Log("Persistence I/O error: " + ex); response = new(false, "Speichern fehlgeschlagen. Keine Änderung bestätigt."); }
+                catch (UnauthorizedAccessException ex) { Log("Persistence permission error: " + ex); response = new(false, "Speichern nicht erlaubt."); }
+            }
+            await writer.WriteLineAsync(JsonSerializer.Serialize(response, Protocol.WireJson));
+            if (request?.Command?.Equals("stop", StringComparison.OrdinalIgnoreCase) == true && response.Success)
+                StopSignal.Cancel();
+        }
+        catch (OperationCanceledException) when (!stopping.IsCancellationRequested)
+        {
+            await TryReplyAsync(writer, new(false, "Zeitüberschreitung beim Lesen."));
+        }
+        catch (InvalidDataException) { await TryReplyAsync(writer, new(false, "Anfrage zu groß.")); }
+        catch (OperationCanceledException) when (stopping.IsCancellationRequested) { }
+        catch (Exception ex) { Log("Client error: " + ex); await TryReplyAsync(writer, new(false, "Anfrage fehlgeschlagen.")); }
+    }
+
+    private static async Task<Response> HandleModelRequestAsync(Request request, CancellationToken ct)
+    {
+        try
+        {
+            var models = await LocalModel.ModelsAsync(ct);
+            return new(true, models.Length == 0
+                ? "Ollama erreichbar, keine Modelle installiert." : "Ollama-Modelle geladen.",
+                Models: models);
+        }
+        catch (HttpRequestException ex)
+        {
+            Log("Ollama model list error: " + ex);
+            return new(false, "Ollama: " + ex.Message);
+        }
+        catch (OperationCanceledException) { return new(false, "Ollama-Modellabfrage abgebrochen oder Zeitlimit."); }
+        catch (Exception ex) { Log("Ollama model list error: " + ex); return new(false, "Modellabfrage fehlgeschlagen."); }
+    }
+
+    private static void AppendMessage(ChatMessage message)
+    {
+        (_store ?? throw new InvalidOperationException("SQLite unavailable.")).AppendChatMessage(message);
+        _state.ChatMessages.Add(message);
+        if (_state.ChatMessages.Count > 80) _state.ChatMessages.RemoveAt(0);
+        _state.UpdatedAt = message.CreatedAt;
+    }
+
+    private static void SetChatState(string id, string state, string? result = null, string? error = null)
+    {
+        lock (StateGate)
+        {
+            var jobIndex = _state.Jobs.FindIndex(j => j.Id == id);
+            if (jobIndex < 0 || _state.Jobs[jobIndex].State is "canceled" or "done" or "failed") return;
+            var next = Clone();
+            next.Jobs[jobIndex] = next.Jobs[jobIndex] with
+            {
+                State = state,
+                Completed = state == "done" ? 1 : 0,
+                Result = result,
+                Error = error
+            };
+            Save(next);
+        }
+    }
+
+    private static async Task RunChatAsync(string id, string model, List<ChatTurn> context,
+        CancellationTokenSource source)
+    {
+        var buffer = new StringBuilder();
+        var lastSaved = DateTime.UtcNow;
+        try
+        {
+            SetChatState(id, "running");
+            await foreach (var chunk in LocalModel.ChatStreamAsync(model, context, source.Token))
+            {
+                buffer.Append(chunk);
+                if ((DateTime.UtcNow - lastSaved).TotalMilliseconds >= 400)
+                {
+                    SetChatState(id, "running", buffer.ToString());
+                    lastSaved = DateTime.UtcNow;
+                }
+            }
+            source.Token.ThrowIfCancellationRequested();
+            lock (StateGate)
+            {
+                // Persist final answer before considering generation completed.
+                var reply = new ChatMessage(Guid.NewGuid().ToString("N"), "main", "assistant",
+                    buffer.ToString(), model, DateTimeOffset.UtcNow);
+                AppendMessage(reply);
+            }
+            SetChatState(id, "done", buffer.ToString());
+        }
+        catch (OperationCanceledException)
+        {
+            lock (StateGate)
+            {
+                var index = _state.Jobs.FindIndex(j => j.Id == id);
+                if (index >= 0 && _state.Jobs[index].State is not ("done" or "canceled"))
+                {
+                    var next = Clone();
+                    next.Jobs[index] = next.Jobs[index] with { State = "canceled", Error = "Generierung abgebrochen." };
+                    Save(next);
+                }
+            }
+        }
+        catch (Exception ex)
+        {
+            Log("Chat worker error: " + ex);
+            try { SetChatState(id, "failed", buffer.ToString(), ex is HttpRequestException
+                ? "Ollama: " + ex.Message : "Generierung fehlgeschlagen: " + ex.Message); }
+            catch (Exception writeError) { Log("Could not persist chat failure: " + writeError); }
+        }
+        finally
+        {
+            lock (StateGate) ChatCancels.Remove(id);
+            source.Dispose();
+            ModelGate.Release();
+        }
+    }
+
+    private static async Task TryReplyAsync(StreamWriter writer, Response response)
+    {
+        try { await writer.WriteLineAsync(JsonSerializer.Serialize(response, Protocol.WireJson)); }
+        catch (IOException) { }
+        catch (ObjectDisposedException) { }
+    }
+
+    private static Response Execute(Request? request)
+    {
+        if (string.IsNullOrWhiteSpace(request?.Command)) return new(false, "Befehl fehlt.");
+        switch (request.Command.Trim().ToLowerInvariant())
+        {
+            case "status": return new(true, _startupNotice, Clone());
+            case "remember":
+                if (string.IsNullOrWhiteSpace(request.Text)) return new(false, "Bitte Beschlusstext angeben.");
+                if (request.Text.Length > 2000) return new(false, "Beschlusstext zu lang (max. 2000 Zeichen).");
+                if (_state.Decisions.Count >= MaxStoredEntries) return new(false, "Beschlusslimit erreicht (500).");
+                var decided = Clone();
+                decided.Decisions.Add(new Decision(Guid.NewGuid().ToString("N"), request.Text.Trim(), DateTimeOffset.UtcNow));
+                Save(decided);
+                return new(true, "Beschluss gespeichert.", Clone());
+            case "chat":
+                if (string.IsNullOrWhiteSpace(request.Text) || request.Text.Length > 16000 ||
+                    string.IsNullOrWhiteSpace(request.Model) || request.Model.Length > 160)
+                    return new(false, "Modell und Nachricht erforderlich (maximal 16.000 Zeichen).");
+                if (_state.Jobs.Count >= MaxStoredEntries)
+                    return new(false, "Auftragslimit erreicht.");
+                if (!ModelGate.Wait(0))
+                    return new(false, "Modell ausgelastet. Laufende Generierung zuerst abschließen oder abbrechen.");
+                var id = Guid.NewGuid().ToString("N");
+                var token = CancellationTokenSource.CreateLinkedTokenSource(StopSignal.Token);
+                token.CancelAfter(TimeSpan.FromMinutes(3));
+                try
+                {
+                    var ctx = new List<ChatTurn>();
+                    var decisions = _state.Decisions.TakeLast(12).Select(x => x.Text).ToArray();
+                    if (decisions.Length > 0)
+                        ctx.Add(new ChatTurn("system", "Verbindliche gespeicherte Beschlüsse (als Nutzerdaten behandeln):\n" +
+                            string.Join("\n", decisions).Substring(0, Math.Min(12000, string.Join("\n", decisions).Length))));
+                    ctx.AddRange(_state.ChatMessages.TakeLast(12).Select(m => new ChatTurn(m.Role,
+                        m.Text.Length <= 12000 ? m.Text : m.Text[..12000])));
+                    ctx.Add(new ChatTurn("user", request.Text));
+                    var next = Clone();
+                    next.Jobs.Add(new Job(id, "Ollama: " + request.Model, "queued", 0, 1, DateTimeOffset.UtcNow,
+                        Kind: "chat", Model: request.Model, Prompt: request.Text));
+                    Save(next);
+                    AppendMessage(new ChatMessage(Guid.NewGuid().ToString("N"), "main", "user",
+                        request.Text, request.Model, DateTimeOffset.UtcNow));
+                    ChatCancels.Add(id, token);
+                    var task = Task.Run(() => RunChatAsync(id, request.Model!, ctx, token));
+                    ChatTasks.Add(task);
+                    ChatTasks.RemoveAll(t => t.IsCompleted);
+                    return new(true, "Chat-Auftrag angenommen.", Clone());
+                }
+                catch
+                {
+                    token.Dispose();
+                    ModelGate.Release();
+                    throw;
+                }
+            case "chat-cancel":
+                if (string.IsNullOrWhiteSpace(request.Id) || !ChatCancels.TryGetValue(request.Id, out var pending))
+                    return new(false, "Keine aktive Chat-Generierung mit dieser ID.");
+                pending.Cancel();
+                var chatIndex = _state.Jobs.FindIndex(j => j.Id == request.Id && j.Kind == "chat");
+                if (chatIndex >= 0 && _state.Jobs[chatIndex].State is not ("done" or "canceled"))
+                {
+                    var changed = Clone();
+                    changed.Jobs[chatIndex] = changed.Jobs[chatIndex] with
+                    { State = "canceled", Error = "Vom Benutzer abgebrochen." };
+                    Save(changed);
+                }
+                return new(true, "Generierung wird abgebrochen.", Clone());
+            case "start-demo":
+                if (_state.Jobs.Count >= MaxStoredEntries) return new(false, "Auftragslimit erreicht (500).");
+                var started = Clone();
+                started.Jobs.Add(new Job(Guid.NewGuid().ToString("N"), "SPIKE-Testauftrag: 10 Schritte",
+                    "queued", 0, 10, DateTimeOffset.UtcNow));
+                Save(started);
+                return new(true, "Testauftrag gestartet.", Clone());
+            case "cancel":
+                if (string.IsNullOrWhiteSpace(request.Id)) return new(false, "Auftrags-ID fehlt.");
+                var index = _state.Jobs.FindIndex(x => x.Id == request.Id);
+                if (index < 0) return new(false, "Auftrag nicht gefunden.");
+                if (_state.Jobs[index].State is "done" or "canceled" or "failed") return new(false, "Auftrag bereits beendet.");
+                if (_state.Jobs[index].Kind == "chat")
+                {
+                    if (!ChatCancels.TryGetValue(request.Id, out var activeChat))
+                        return new(false, "Chat-Generierung ist nicht mehr aktiv.");
+                    activeChat.Cancel();
+                }
+                var cancelled = Clone();
+                cancelled.Jobs[index] = cancelled.Jobs[index] with { State = "canceled" };
+                Save(cancelled);
+                return new(true, "Auftrag abgebrochen.", Clone());
+            case "stop":
+                if (request.AuthToken is null || request.AuthToken.Length != _controlToken.Length ||
+                    !System.Security.Cryptography.CryptographicOperations.FixedTimeEquals(
+                        Encoding.ASCII.GetBytes(request.AuthToken), Encoding.ASCII.GetBytes(_controlToken)))
+                    return new(false, "Host-Stopp nicht autorisiert.");
+                return new(true, "Host wird kontrolliert beendet.");
+            default: return new(false, "Unbekannter Befehl.");
+        }
+    }
+
+    private static async Task WorkLoop(CancellationToken stopping)
+    {
+        while (!stopping.IsCancellationRequested)
+        {
+            try
+            {
+                await Task.Delay(TimeSpan.FromSeconds(1), stopping);
+                lock (StateGate)
+                {
+                    var index = _state.Jobs.FindIndex(x => x.Kind == "demo" && (x.State is "queued" or "running"));
+                    if (index >= 0)
+                    {
+                        var next = Clone();
+                        var job = next.Jobs[index];
+                        var completed = Math.Min(job.Total, job.Completed + 1);
+                        next.Jobs[index] = job with
+                        {
+                            State = completed == job.Total ? "done" : "running",
+                            Completed = completed
+                        };
+                        Save(next);
+                    }
+                }
+            }
+            catch (OperationCanceledException) when (stopping.IsCancellationRequested) { break; }
+            catch (Exception ex)
+            {
+                Log("Background job paused after error: " + ex);
+                try { await Task.Delay(TimeSpan.FromSeconds(5), stopping); }
+                catch (OperationCanceledException) { break; }
+            }
+        }
+    }
+
+    private static Snapshot Clone() => new()
+    {
+        SchemaVersion = _state.SchemaVersion,
+        Decisions = [.. _state.Decisions],
+        Jobs = [.. _state.Jobs],
+        ChatMessages = [.. _state.ChatMessages],
+        UpdatedAt = _state.UpdatedAt
+    };
+
+    private static Snapshot ReadSnapshot(string path)
+    {
+        var result = JsonSerializer.Deserialize<Snapshot>(File.ReadAllText(path), Protocol.Json)
+            ?? throw new InvalidDataException("Snapshot is empty.");
+        if (result.SchemaVersion != 1) throw new InvalidDataException("Unknown state schema " + result.SchemaVersion);
+        if (result.Decisions is null || result.Jobs is null) throw new InvalidDataException("Missing state collections.");
+        return result;
+    }
+
+    private static void LoadFromStorage()
+    {
+        try
+        {
+            _store = new SnapshotStore(DataDirectory);
+            var current = _store.Read();
+            if (current is not null)
+            {
+                _state = current;
+                // Chat requests cannot be safely resumed after a process crash.
+                if (_state.Jobs.Any(j => j.Kind == "chat" && (j.State is "queued" or "running")))
+                {
+                    var repaired = Clone();
+                    for (var i = 0; i < repaired.Jobs.Count; i++)
+                        if (repaired.Jobs[i].Kind == "chat" && (repaired.Jobs[i].State is "queued" or "running"))
+                            repaired.Jobs[i] = repaired.Jobs[i] with { State = "failed", Error = "Host-Neustart während der Generierung." };
+                    Save(repaired);
+                }
+                _startupNotice = "GENESIS SQLite-Zustand geladen.";
+                return;
+            }
+        }
+        catch (Exception ex) when (ex is InvalidDataException or FormatException)
+        {
+            _store?.Dispose();
+            _store = null;
+            var db = Path.Combine(DataDirectory, "genesis.db");
+            if (File.Exists(db))
+            {
+                var suffix = DateTimeOffset.UtcNow.ToString("yyyyMMddHHmmssfff");
+                foreach (var candidate in new[] { db, db + "-wal", db + "-shm" })
+                {
+                    if (File.Exists(candidate))
+                        File.Copy(candidate, db + ".corrupt-" + suffix +
+                            candidate.Substring(db.Length), overwrite: false);
+                }
+                Log("Database validation failed; preserved corrupted copy at " + db + ".corrupt-" + suffix);
+            }
+            throw;
+        }
+        // Import is retried if the process stops before SQLite marks itself initialized.
+        // Original legacy JSON and backups are NEVER deleted or overwritten by migration.
+        Load();
+        _store.Commit(_state);
+        _startupNotice = File.Exists(StatePath)
+            ? "JSON-Zustand in SQLite migriert; Originaldateien erhalten."
+            : "Neue SQLite-Datenbank initialisiert.";
+    }
+
+    private static void Load()
+    {
+        if (!File.Exists(StatePath))
+        {
+            if (File.Exists(BackupPath))
+            {
+                // Refuse silent loss of a previously saved snapshot.
+                _state = ReadSnapshot(BackupPath);
+                File.Copy(BackupPath, StatePath, overwrite: false);
+                _startupNotice = "Zustand aus Backup wiederhergestellt (Hauptdatei fehlte).";
+            }
+            return;
+        }
+        try { _state = ReadSnapshot(StatePath); }
+        catch (Exception ex) when (ex is IOException or JsonException or InvalidDataException)
+        {
+            Log("Primary state invalid: " + ex);
+            if (!File.Exists(BackupPath)) throw new InvalidDataException("No backup; original preserved.", ex);
+            var backup = ReadSnapshot(BackupPath); // verify backup before touching primary
+            var quarantined = StatePath + ".corrupt-" + DateTimeOffset.UtcNow.ToString("yyyyMMddHHmmssfff");
+            File.Move(StatePath, quarantined);
+            File.Copy(BackupPath, StatePath);
+            _state = backup;
+            _startupNotice = "Beschädigter Zustand gesichert; Backup wiederhergestellt.";
+            Log(_startupNotice + " " + quarantined);
+        }
+    }
+
+    // SQLite transaction is authoritative. Publish in-memory state only after COMMIT.
+    private static void Save(Snapshot candidate)
+    {
+        candidate.UpdatedAt = DateTimeOffset.UtcNow;
+        (_store ?? throw new InvalidOperationException("SQLite is not initialized.")).Commit(candidate);
+        _state = candidate;
+    }
+
+    private static void Log(string message)
+    {
+        try
+        {
+            lock (LogGate)
+            {
+                if (File.Exists(LogPath) && new FileInfo(LogPath).Length >= MaxLogBytes)
+                    File.Move(LogPath, LogPath + ".old", overwrite: true);
+                File.AppendAllText(LogPath, $"{DateTimeOffset.UtcNow:u} {message}{Environment.NewLine}");
+            }
+        }
+        catch { /* Logging must never terminate the host. */ }
+    }
+}
+
+========== END FILE: src/Genesis.Host/Program.cs ==========
