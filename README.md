@@ -1,11 +1,20 @@
 # JOSHUA GENESIS – öffentliche Expertenprüfung
 
-## Neueste Expertenprüfung: GENESIS 0.3.1-R1
+## Neueste Expertenprüfung: GENESIS 0.3.2 Stability Candidate
+
+- [**Vollständiges Quellcodepaket (25 Dateien, eine TXT)**](REVIEW_BUNDLE_0.3.2_STABILITY.txt)
+- [**Prüfauftrag für Gemini und Meta**](REVIEW_0.3.2_STABILITY.md)
+
+Exakter Quellcommit `78c29129906f03ef6d92dedf0b4c27e66937e106`; Windows-CI **43775026013: SUCCESS** (UI, Host, Protokoll, Ollama-Vertrag, Paketierung und vollständige Windows-Hostintegration). Draft-PR [#8](https://github.com/DukeGozer/JOSHUA-SPIKE-5-GENESIS/pull/8), basiert auf dem unabhängig geprüften R1-Zweig und ist noch nicht gemergt. Das neue Stabilitätspaket ergänzt Fail-Closed bei doppelten Persistenzfehlern, eine begrenzte Laufzeit-Jobansicht ohne Löschen historischer SQLite-Daten, Shutdown-Aufnahmesperre, Schutz vor veralteten UI-Polls, nicht-fatale Fortschrittsupdate-Fehler und vollständige Beschluss-/Gesprächskontexte.
+
+**Noch keine reale Ollama/Qwen-GPU-, interaktive WPF-, Drei-Monitor-/Misch-DPI- oder Dauerlauf-Abnahme.** Kein Produktions-Release.
+
+## Vorheriger Reviewstand: GENESIS 0.3.1-R1
 
 - [**Vollständiges R1-Quellcodepaket (25 Dateien, eine TXT)**](REVIEW_BUNDLE_0.3.1_R1.txt)
-- [**Neuer Prüfauftrag für Gemini und Meta**](REVIEW_0.3.1_R1.md)
+- [**Prüfauftrag**](REVIEW_0.3.1_R1.md)
 
-Exakter Quellcommit `b36c3555619f2b0df4edba7d703211886004dc25`; Windows-CI **43771075211: success** (UI, Host, Protokoll, Ollama-Vertrag, Paketlayout und End-to-End-Integration). Neuer Draft-PR [#7](https://github.com/DukeGozer/JOSHUA-SPIKE-5-GENESIS/pull/7), noch nicht gemergt. R1 ergänzt atomare Chatpersistenz, wiederholbare SQLite-Migration, ehrlichen Abbruchstatus, Wiederherstellung nach Host-Absturz, Quarantäne bei SQLite-Korruption, begrenzten vollständigen Gesprächskontext und UI-Stabilisierung.
+Exakter Quellcommit `b36c3555619f2b0df4edba7d703211886004dc25`; Windows-CI **43771026013: success** (UI, Host, Protokoll, Ollama-Vertrag, Paketlayout und End-to-End-Integration). R1 ergänzt atomare Chatpersistenz, wiederholbare SQLite-Migration, ehrlichen Abbruchstatus, Wiederherstellung nach Host-Absturz, Quarantäne bei SQLite-Korruption, begrenzten vollständigen Gesprächskontext und UI-Stabilisierung.
 
 **Noch keine reale Ollama/Qwen-GPU- oder interaktive WPF-/Mehrmonitor-Abnahme.** Nicht produktionsfreigegeben.
 
