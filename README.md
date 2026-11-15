@@ -1,6 +1,13 @@
 # JOSHUA GENESIS – öffentliche Expertenprüfung
 
-## Aktueller Entwicklungsstand: GENESIS 0.3.0
+## Neu: korrigierter Reviewstand 0.3.0-R1
+
+- [**Vollständiger Quellcode (22 Dateien, ein TXT)**](REVIEW_BUNDLE_0.3.0_R1.txt)
+- [**Prüfauftrag nach Eigenprüfung**](REVIEW_0.3.0_R1.md)
+
+R1 enthält gezielte Ollama-HTTP-Größenbegrenzungen, SQLite-Schema-Validierung und neue Regressionstests. Der exakte Windows-CI-Lauf **43733693930** ist erfolgreich. **Noch keine Produktionsfreigabe.**
+
+## Vorheriger Entwicklungsstand: GENESIS 0.3.0
 
 - [**Gesamter Quellcode als eine TXT-Datei (22 Dateien)**](REVIEW_BUNDLE_0.3.0.txt)
 - [**Prüfauftrag für Gemini und Meta**](REVIEW_0.3.0.md)
