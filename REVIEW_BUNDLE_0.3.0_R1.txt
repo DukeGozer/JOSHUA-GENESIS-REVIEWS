@@ -1,0 +1,1538 @@
+PROJECT JOSHUA SPIKE 5.0 GENESIS — COMPLETE SOURCE REVIEW BUNDLE 0.3.0-R1 SELF-REVIEW PATCH
+
+STATUS: EXPERIMENTAL REVIEW CANDIDATE, NOT RELEASED FOR PRODUCTION
+SOURCE: private DukeGozer/JOSHUA-SPIKE-5-GENESIS
+EXACT SOURCE COMMIT: 4cd839943e405c5cded7cc5b145dad77f7bc4792
+WINDOWS CI: https://github.com/DukeGozer/JOSHUA-SPIKE-5-GENESIS/actions/runs/43733693930
+WINDOWS CI RESULT: success (WPF + Host build, protocol smoke, mocked Ollama contract smoke, publish, SQLite migration/host integration)
+SOURCE FILE COUNT: 22
+CORRECTIONS: HTTP response size bound, SQLite schema fail-closed, additional integration and Ollama regression tests.
+CONTENTS: full 0.2.0 SQLite implementation and 0.3.0 Command Deck + local Ollama transport, projects, scripts, tests
+NOTE: The Ollama test uses a simulated HTTP handler, NOT a real Qwen/Ollama runtime.
+NOTE: No streamed or persistent multi-turn chat. No UI interaction/hardware, GPU, security penetration, or actual LLM quality testing.
+NO old JOSHUA NEXT/R57 code, proprietary datasets, passwords, tokens, or personal data intentionally included.
+
+Original repository file paths and Git blob hashes are included below. Review source content rather than assuming successful CI is a product release.
+
+========================= BEGIN SOURCE =========================
+
+========== BEGIN FILE: .github/workflows/windows-build.yml ==========
+GIT-BLOB-SHA: e84e5bdf72ff0f5d5311d4855fe7e5c70c5ad0ef
+name: Windows build
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  windows-build:
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Install .NET 8 SDK
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '8.0.x'
+      - name: Build Genesis UI
+        if: hashFiles('src/Genesis.UI/Genesis.UI.csproj') != ''
+        shell: pwsh
+        run: dotnet build src/Genesis.UI/Genesis.UI.csproj --configuration Release --nologo
+      - name: Build Genesis Host
+        if: hashFiles('src/Genesis.Host/Genesis.Host.csproj') != ''
+        shell: pwsh
+        run: dotnet build src/Genesis.Host/Genesis.Host.csproj --configuration Release --nologo
+      - name: Protocol roundtrip smoke test
+        shell: pwsh
+        run: dotnet run --project tests/Genesis.ProtocolSmoke/Genesis.ProtocolSmoke.csproj --configuration Release --no-launch-profile
+      - name: Ollama API contract smoke test
+        shell: pwsh
+        run: dotnet run --project tests/Genesis.OllamaSmoke/Genesis.OllamaSmoke.csproj --configuration Release --no-launch-profile
+      - name: Package layout verification
+        shell: pwsh
+        run: pwsh -NoProfile -File scripts/build-release.ps1
+      - name: End-to-end Windows host integration
+        shell: pwsh
+        run: dotnet run --project tests/Genesis.IntegrationSmoke/Genesis.IntegrationSmoke.csproj --configuration Release --no-launch-profile -- "dist/JoshuaSpike5Genesis-win-x64/Host/Genesis.Host.exe"
+      - name: Upload Windows build artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: GENESIS-0.3.0-win-x64-UNREVIEWED
+          path: dist/JoshuaSpike5Genesis-win-x64/
+          retention-days: 7
+          if-no-files-found: error
+
+========== END FILE: .github/workflows/windows-build.yml ==========
+
+
+========== BEGIN FILE: src/Genesis.Contracts/Genesis.Contracts.csproj ==========
+GIT-BLOB-SHA: 6520c0a0a216b23489fb198e00dd405d60771dec
+<Project Sdk="Microsoft.NET.Sdk"><PropertyGroup><Version>0.3.0</Version><AssemblyVersion>0.3.0.0</AssemblyVersion><FileVersion>0.3.0.0</FileVersion><InformationalVersion>0.3.0-review-candidate</InformationalVersion><TargetFramework>net8.0</TargetFramework><Nullable>enable</Nullable><ImplicitUsings>enable</ImplicitUsings></PropertyGroup></Project>
+========== END FILE: src/Genesis.Contracts/Genesis.Contracts.csproj ==========
+
+
+========== BEGIN FILE: src/Genesis.Contracts/Protocol.cs ==========
+GIT-BLOB-SHA: 5781b93393da8d042f0ebe65b95a64ef4740b898
+using System.Text.Json;
+
+namespace Genesis.Contracts;
+
+public static class Protocol
+{
+    public const string PipeName = "joshua-spike-5-genesis-v1";
+    public static bool TestOverridesEnabled => Environment.GetEnvironmentVariable("GENESIS_ALLOW_TEST_OVERRIDES") == "1";
+    public static string ActivePipeName => TestOverridesEnabled
+        ? Environment.GetEnvironmentVariable("GENESIS_PIPE_NAME") ?? PipeName : PipeName;
+    public static readonly JsonSerializerOptions Json = new(JsonSerializerDefaults.Web) { WriteIndented = true };
+    public static readonly JsonSerializerOptions WireJson = new(JsonSerializerDefaults.Web) { WriteIndented = false };
+}
+
+public sealed record Request(string Command, string? Text = null, string? Id = null, string? AuthToken = null, string? Model = null);
+public sealed record Response(bool Success, string Message, Snapshot? Data = null, string[]? Models = null, string? ChatText = null);
+public sealed record Decision(string Id, string Text, DateTimeOffset CreatedAt);
+public sealed record Job(string Id, string Title, string State, int Completed, int Total, DateTimeOffset CreatedAt, string? Error = null);
+public sealed class Snapshot
+{
+    public int SchemaVersion { get; set; } = 1;
+    public List<Decision> Decisions { get; set; } = [];
+    public List<Job> Jobs { get; set; } = [];
+    public DateTimeOffset UpdatedAt { get; set; } = DateTimeOffset.UtcNow;
+}
+========== END FILE: src/Genesis.Contracts/Protocol.cs ==========
+
+
+========== BEGIN FILE: src/Genesis.Host/Genesis.Host.csproj ==========
+GIT-BLOB-SHA: 06dea6fc0cc7a6e8dc82344798c572ee649918d1
+<Project Sdk="Microsoft.NET.Sdk"><PropertyGroup><Version>0.3.0</Version><AssemblyVersion>0.3.0.0</AssemblyVersion><FileVersion>0.3.0.0</FileVersion><InformationalVersion>0.3.0-review-candidate</InformationalVersion><OutputType>WinExe</OutputType><TargetFramework>net8.0</TargetFramework><Nullable>enable</Nullable><ImplicitUsings>enable</ImplicitUsings></PropertyGroup><ItemGroup><ProjectReference Include="../Genesis.Contracts/Genesis.Contracts.csproj" /><ProjectReference Include="../Genesis.Storage/Genesis.Storage.csproj" /><ProjectReference Include="../Genesis.Ollama/Genesis.Ollama.csproj" /></ItemGroup></Project>
+========== END FILE: src/Genesis.Host/Genesis.Host.csproj ==========
+
+
+========== BEGIN FILE: src/Genesis.Host/Program.cs ==========
+GIT-BLOB-SHA: ad338ed4cc38dc90f8cece346b6912aee6d36d43
+using System.IO.Pipes;
+using System.Text;
+using System.Text.Json;
+using Genesis.Contracts;
+using Genesis.Storage;
+using Genesis.Ollama;
+
+namespace Genesis.Host;
+
+internal static class Program
+{
+    private static readonly object StateGate = new();
+    private static readonly object LogGate = new();
+    private static readonly CancellationTokenSource StopSignal = new();
+    private static readonly string DataDirectory = (Protocol.TestOverridesEnabled
+        ? Environment.GetEnvironmentVariable("GENESIS_DATA_DIR") : null)
+        ?? Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "JoshuaSpike5Genesis");
+    private static readonly string StatePath = Path.Combine(DataDirectory, "state.json");
+    private static readonly string BackupPath = StatePath + ".bak";
+    private static readonly string LogPath = Path.Combine(DataDirectory, "host.log");
+    private static readonly string ControlTokenPath = Path.Combine(DataDirectory, "control.token");
+    private static string _controlToken = "";
+    private static Snapshot _state = new();
+    private static SnapshotStore? _store;
+    private static readonly OllamaClient LocalModel = new();
+    private static string _startupNotice = "GENESIS Host erreichbar";
+    private const int MaxRequestChars = 64 * 1024;
+    private const int MaxStoredEntries = 500;
+    private const long MaxLogBytes = 1024 * 1024;
+
+    private static async Task<int> Main()
+    {
+        Directory.CreateDirectory(DataDirectory);
+        try
+        {
+            using var singleton = new FileStream(Path.Combine(DataDirectory, "host.lock"),
+                FileMode.OpenOrCreate, FileAccess.ReadWrite, FileShare.None);
+            LoadFromStorage();
+            // Capability token prevents accidental or blind stop requests, not malicious same-user processes.
+            _controlToken = Convert.ToHexString(System.Security.Cryptography.RandomNumberGenerator.GetBytes(32));
+            File.WriteAllText(ControlTokenPath, _controlToken, new UTF8Encoding(false));
+            Log("GENESIS 0.1.2 Host started.");
+            var worker = Task.Run(() => WorkLoop(StopSignal.Token));
+            var clientSlots = new SemaphoreSlim(16, 16);
+            var activeClients = new List<Task>();
+            try
+            {
+                while (!StopSignal.IsCancellationRequested)
+                {
+                    await clientSlots.WaitAsync(StopSignal.Token).ConfigureAwait(false);
+                    NamedPipeServerStream? server = null;
+                    try
+                    {
+                        server = new NamedPipeServerStream(Protocol.ActivePipeName,
+                            PipeDirection.InOut, 16, PipeTransmissionMode.Byte,
+                            PipeOptions.Asynchronous | PipeOptions.CurrentUserOnly);
+                        await server.WaitForConnectionAsync(StopSignal.Token);
+                        // The task owns the connected pipe and releases its concurrency slot.
+                        var connected = server;
+                        server = null;
+                        var task = ProcessClientAsync(connected, StopSignal.Token, clientSlots);
+                        activeClients.Add(task);
+                        activeClients.RemoveAll(t => t.IsCompleted);
+                    }
+                    catch (OperationCanceledException) when (StopSignal.IsCancellationRequested)
+                    {
+                        server?.Dispose();
+                        clientSlots.Release();
+                        break;
+                    }
+                    catch (Exception ex)
+                    {
+                        server?.Dispose();
+                        clientSlots.Release();
+                        Log("Pipe accept error: " + ex);
+                        await Task.Delay(200, StopSignal.Token);
+                    }
+                }
+            }
+            catch (OperationCanceledException) when (StopSignal.IsCancellationRequested) { }
+            finally
+            {
+                StopSignal.Cancel();
+                try { await Task.WhenAll(activeClients); }
+                catch (Exception ex) { Log("Client shutdown error: " + ex); }
+                try { await worker; } catch (OperationCanceledException) { }
+                clientSlots.Dispose();
+                _store?.Dispose();
+                try { File.Delete(ControlTokenPath); } catch (IOException ex) { Log("Could not delete control token: " + ex.Message); }
+                Log("GENESIS host stopped.");
+            }
+            return 0;
+        }
+        catch (IOException ex) { Log("Host lock unavailable (possibly already running): " + ex.Message); return 2; }
+        catch (Exception ex) { Log("Host startup failed: " + ex); return 1; }
+    }
+
+    private static async Task ProcessClientAsync(
+        NamedPipeServerStream pipe, CancellationToken stopping, SemaphoreSlim slots)
+    {
+        try
+        {
+            using (pipe) await HandleClient(pipe, stopping);
+        }
+        catch (Exception ex) { Log("Unhandled client error: " + ex); }
+        finally { slots.Release(); }
+    }
+
+    private static async Task HandleClient(NamedPipeServerStream pipe, CancellationToken stopping)
+    {
+        // Handle one request per connection; every read has a deadline and size bound.
+        using var reader = new StreamReader(pipe, Encoding.UTF8, detectEncodingFromByteOrderMarks: false, leaveOpen: true);
+        using var writer = new StreamWriter(pipe, new UTF8Encoding(false), leaveOpen: true) { AutoFlush = true };
+        try
+        {
+            using var timeout = CancellationTokenSource.CreateLinkedTokenSource(stopping);
+            timeout.CancelAfter(TimeSpan.FromSeconds(10));
+            var line = await PipeLineCodec.ReadBoundedAsync(reader, MaxRequestChars, timeout.Token);
+            if (line is null) return;
+            Request? request;
+            try { request = JsonSerializer.Deserialize<Request>(line, Protocol.WireJson); }
+            catch (JsonException)
+            {
+                await writer.WriteLineAsync(JsonSerializer.Serialize(
+                    new Response(false, "Ungültiges JSON."), Protocol.WireJson));
+                return;
+            }
+
+            // Ollama may take minutes. Never hold the state lock or block other pipe clients.
+            if (request?.Command is not null &&
+                (request.Command.Equals("models", StringComparison.OrdinalIgnoreCase) ||
+                 request.Command.Equals("chat", StringComparison.OrdinalIgnoreCase)))
+            {
+                using var modelTimeout = CancellationTokenSource.CreateLinkedTokenSource(stopping);
+                modelTimeout.CancelAfter(TimeSpan.FromMinutes(3));
+                var modelResponse = await HandleModelRequestAsync(request, modelTimeout.Token);
+                await writer.WriteLineAsync(JsonSerializer.Serialize(modelResponse, Protocol.WireJson));
+                return;
+            }
+
+            Response response;
+            lock (StateGate)
+            {
+                try { response = Execute(request); }
+                catch (IOException ex) { Log("Persistence I/O error: " + ex); response = new(false, "Speichern fehlgeschlagen. Keine Änderung bestätigt."); }
+                catch (UnauthorizedAccessException ex) { Log("Persistence permission error: " + ex); response = new(false, "Speichern nicht erlaubt."); }
+            }
+            await writer.WriteLineAsync(JsonSerializer.Serialize(response, Protocol.WireJson));
+            if (request?.Command?.Equals("stop", StringComparison.OrdinalIgnoreCase) == true && response.Success)
+                StopSignal.Cancel();
+        }
+        catch (OperationCanceledException) when (!stopping.IsCancellationRequested)
+        {
+            await TryReplyAsync(writer, new(false, "Zeitüberschreitung beim Lesen."));
+        }
+        catch (InvalidDataException) { await TryReplyAsync(writer, new(false, "Anfrage zu groß.")); }
+        catch (OperationCanceledException) when (stopping.IsCancellationRequested) { }
+        catch (Exception ex) { Log("Client error: " + ex); await TryReplyAsync(writer, new(false, "Anfrage fehlgeschlagen.")); }
+    }
+
+    private static async Task<Response> HandleModelRequestAsync(Request request, CancellationToken ct)
+    {
+        try
+        {
+            if (request.Command.Equals("models", StringComparison.OrdinalIgnoreCase))
+            {
+                var models = await LocalModel.ModelsAsync(ct);
+                return new(true, models.Length == 0 ? "Ollama erreichbar, keine Modelle installiert." : "Ollama-Modelle geladen.",
+                    Models: models);
+            }
+            if (request.Text is null || request.Model is null)
+                return new(false, "Nachricht und Modellname erforderlich.");
+            if (request.Text.Length > 16000 || request.Model.Length > 160)
+                return new(false, "Nachricht oder Modellname zu lang.");
+            var answer = await LocalModel.ChatAsync(request.Model, request.Text, ct);
+            if (answer.Length > 250000) answer = answer[..250000] + "\n[Ausgabe gekürzt]";
+            return new(true, "Antwort von lokalem Ollama.", ChatText: answer);
+        }
+        catch (HttpRequestException ex) { Log("Ollama HTTP error: " + ex); return new(false, "Ollama nicht erreichbar oder HTTP-Fehler. Läuft Ollama lokal?"); }
+        catch (OperationCanceledException) { return new(false, "Ollama-Zeitlimit überschritten."); }
+        catch (Exception ex) { Log("Ollama error: " + ex); return new(false, "Modellanfrage fehlgeschlagen. Details in host.log."); }
+    }
+
+    private static async Task TryReplyAsync(StreamWriter writer, Response response)
+    {
+        try { await writer.WriteLineAsync(JsonSerializer.Serialize(response, Protocol.WireJson)); }
+        catch (IOException) { }
+        catch (ObjectDisposedException) { }
+    }
+
+    private static Response Execute(Request? request)
+    {
+        if (string.IsNullOrWhiteSpace(request?.Command)) return new(false, "Befehl fehlt.");
+        switch (request.Command.Trim().ToLowerInvariant())
+        {
+            case "status": return new(true, _startupNotice, Clone());
+            case "remember":
+                if (string.IsNullOrWhiteSpace(request.Text)) return new(false, "Bitte Beschlusstext angeben.");
+                if (request.Text.Length > 2000) return new(false, "Beschlusstext zu lang (max. 2000 Zeichen).");
+                if (_state.Decisions.Count >= MaxStoredEntries) return new(false, "Beschlusslimit erreicht (500).");
+                var decided = Clone();
+                decided.Decisions.Add(new Decision(Guid.NewGuid().ToString("N"), request.Text.Trim(), DateTimeOffset.UtcNow));
+                Save(decided);
+                return new(true, "Beschluss gespeichert.", Clone());
+            case "start-demo":
+                if (_state.Jobs.Count >= MaxStoredEntries) return new(false, "Auftragslimit erreicht (500).");
+                var started = Clone();
+                started.Jobs.Add(new Job(Guid.NewGuid().ToString("N"), "SPIKE-Testauftrag: 10 Schritte",
+                    "queued", 0, 10, DateTimeOffset.UtcNow));
+                Save(started);
+                return new(true, "Testauftrag gestartet.", Clone());
+            case "cancel":
+                if (string.IsNullOrWhiteSpace(request.Id)) return new(false, "Auftrags-ID fehlt.");
+                var index = _state.Jobs.FindIndex(x => x.Id == request.Id);
+                if (index < 0) return new(false, "Auftrag nicht gefunden.");
+                if (_state.Jobs[index].State is "done" or "canceled") return new(false, "Auftrag bereits beendet.");
+                var cancelled = Clone();
+                cancelled.Jobs[index] = cancelled.Jobs[index] with { State = "canceled" };
+                Save(cancelled);
+                return new(true, "Auftrag abgebrochen.", Clone());
+            case "stop":
+                if (request.AuthToken is null || request.AuthToken.Length != _controlToken.Length ||
+                    !System.Security.Cryptography.CryptographicOperations.FixedTimeEquals(
+                        Encoding.ASCII.GetBytes(request.AuthToken), Encoding.ASCII.GetBytes(_controlToken)))
+                    return new(false, "Host-Stopp nicht autorisiert.");
+                return new(true, "Host wird kontrolliert beendet.");
+            default: return new(false, "Unbekannter Befehl.");
+        }
+    }
+
+    private static async Task WorkLoop(CancellationToken stopping)
+    {
+        while (!stopping.IsCancellationRequested)
+        {
+            try
+            {
+                await Task.Delay(TimeSpan.FromSeconds(1), stopping);
+                lock (StateGate)
+                {
+                    var index = _state.Jobs.FindIndex(x => x.State is "queued" or "running");
+                    if (index >= 0)
+                    {
+                        var next = Clone();
+                        var job = next.Jobs[index];
+                        var completed = Math.Min(job.Total, job.Completed + 1);
+                        next.Jobs[index] = job with
+                        {
+                            State = completed == job.Total ? "done" : "running",
+                            Completed = completed
+                        };
+                        Save(next);
+                    }
+                }
+            }
+            catch (OperationCanceledException) when (stopping.IsCancellationRequested) { break; }
+            catch (Exception ex)
+            {
+                Log("Background job paused after error: " + ex);
+                try { await Task.Delay(TimeSpan.FromSeconds(5), stopping); }
+                catch (OperationCanceledException) { break; }
+            }
+        }
+    }
+
+    private static Snapshot Clone() => new()
+    {
+        SchemaVersion = _state.SchemaVersion,
+        Decisions = [.. _state.Decisions],
+        Jobs = [.. _state.Jobs],
+        UpdatedAt = _state.UpdatedAt
+    };
+
+    private static Snapshot ReadSnapshot(string path)
+    {
+        var result = JsonSerializer.Deserialize<Snapshot>(File.ReadAllText(path), Protocol.Json)
+            ?? throw new InvalidDataException("Snapshot is empty.");
+        if (result.SchemaVersion != 1) throw new InvalidDataException("Unknown state schema " + result.SchemaVersion);
+        if (result.Decisions is null || result.Jobs is null) throw new InvalidDataException("Missing state collections.");
+        return result;
+    }
+
+    private static void LoadFromStorage()
+    {
+        _store = new SnapshotStore(DataDirectory);
+        var existing = _store.Read();
+        if (existing is not null)
+        {
+            _state = existing;
+            _startupNotice = "GENESIS SQLite-Zustand geladen.";
+            return;
+        }
+
+        // Import is retried if the process stops before SQLite marks itself initialized.
+        // Original legacy JSON and backups are NEVER deleted or overwritten by migration.
+        Load();
+        _store.Commit(_state);
+        _startupNotice = File.Exists(StatePath)
+            ? "JSON-Zustand in SQLite migriert; Originaldateien erhalten."
+            : "Neue SQLite-Datenbank initialisiert.";
+    }
+
+    private static void Load()
+    {
+        if (!File.Exists(StatePath))
+        {
+            if (File.Exists(BackupPath))
+            {
+                // Refuse silent loss of a previously saved snapshot.
+                _state = ReadSnapshot(BackupPath);
+                File.Copy(BackupPath, StatePath, overwrite: false);
+                _startupNotice = "Zustand aus Backup wiederhergestellt (Hauptdatei fehlte).";
+            }
+            return;
+        }
+        try { _state = ReadSnapshot(StatePath); }
+        catch (Exception ex) when (ex is IOException or JsonException or InvalidDataException)
+        {
+            Log("Primary state invalid: " + ex);
+            if (!File.Exists(BackupPath)) throw new InvalidDataException("No backup; original preserved.", ex);
+            var backup = ReadSnapshot(BackupPath); // verify backup before touching primary
+            var quarantined = StatePath + ".corrupt-" + DateTimeOffset.UtcNow.ToString("yyyyMMddHHmmssfff");
+            File.Move(StatePath, quarantined);
+            File.Copy(BackupPath, StatePath);
+            _state = backup;
+            _startupNotice = "Beschädigter Zustand gesichert; Backup wiederhergestellt.";
+            Log(_startupNotice + " " + quarantined);
+        }
+    }
+
+    // SQLite transaction is authoritative. Publish in-memory state only after COMMIT.
+    private static void Save(Snapshot candidate)
+    {
+        candidate.UpdatedAt = DateTimeOffset.UtcNow;
+        (_store ?? throw new InvalidOperationException("SQLite is not initialized.")).Commit(candidate);
+        _state = candidate;
+    }
+
+    private static void Log(string message)
+    {
+        try
+        {
+            lock (LogGate)
+            {
+                if (File.Exists(LogPath) && new FileInfo(LogPath).Length >= MaxLogBytes)
+                    File.Move(LogPath, LogPath + ".old", overwrite: true);
+                File.AppendAllText(LogPath, $"{DateTimeOffset.UtcNow:u} {message}{Environment.NewLine}");
+            }
+        }
+        catch { /* Logging must never terminate the host. */ }
+    }
+}
+
+========== END FILE: src/Genesis.Host/Program.cs ==========
+
+
+========== BEGIN FILE: src/Genesis.Host/PipeLineCodec.cs ==========
+GIT-BLOB-SHA: c640d5b60140e8b619a2b1c07816d74f6c0f1bd7
+using System.IO;
+
+namespace Genesis.Host;
+
+public static class PipeLineCodec
+{
+    // A char-by-char reader bounds memory even if a client never sends a newline.
+    public static async Task<string?> ReadBoundedAsync(StreamReader reader, int limit, CancellationToken ct)
+    {
+        if (limit < 1) throw new ArgumentOutOfRangeException(nameof(limit));
+        var line = new System.Text.StringBuilder();
+        var chars = new char[1];
+        while (true)
+        {
+            var read = await reader.ReadAsync(chars.AsMemory(), ct);
+            if (read == 0) return line.Length == 0 ? null : throw new InvalidDataException("Incomplete request.");
+            if (chars[0] == '\n') return line.ToString().TrimEnd('\r');
+            if (line.Length >= limit) throw new InvalidDataException("Request exceeds max length.");
+            line.Append(chars[0]);
+        }
+    }
+}
+
+========== END FILE: src/Genesis.Host/PipeLineCodec.cs ==========
+
+
+========== BEGIN FILE: src/Genesis.UI/Genesis.UI.csproj ==========
+GIT-BLOB-SHA: b0d1e05705f186bd91ef6087f12d6b15b7b3ade4
+<Project Sdk="Microsoft.NET.Sdk"><PropertyGroup><Version>0.3.0</Version><AssemblyVersion>0.3.0.0</AssemblyVersion><FileVersion>0.3.0.0</FileVersion><InformationalVersion>0.3.0-review-candidate</InformationalVersion><OutputType>WinExe</OutputType><TargetFramework>net8.0-windows</TargetFramework><UseWPF>true</UseWPF><EnableWindowsTargeting>true</EnableWindowsTargeting><Nullable>enable</Nullable><ImplicitUsings>enable</ImplicitUsings></PropertyGroup><ItemGroup><ProjectReference Include="../Genesis.Contracts/Genesis.Contracts.csproj" /></ItemGroup></Project>
+========== END FILE: src/Genesis.UI/Genesis.UI.csproj ==========
+
+
+========== BEGIN FILE: src/Genesis.UI/App.xaml ==========
+GIT-BLOB-SHA: ba4315fefd2e1ca1f6a7b6f43d5479d7ae288eec
+<Application x:Class="Genesis.UI.App" xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation" xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml" StartupUri="MainWindow.xaml"><Application.Resources /></Application>
+========== END FILE: src/Genesis.UI/App.xaml ==========
+
+
+========== BEGIN FILE: src/Genesis.UI/App.xaml.cs ==========
+GIT-BLOB-SHA: ed4defd41fdbde14e59763217283da30457eb4d1
+using System.Windows;
+namespace Genesis.UI;
+public partial class App : Application { }
+========== END FILE: src/Genesis.UI/App.xaml.cs ==========
+
+
+========== BEGIN FILE: src/Genesis.UI/MainWindow.xaml ==========
+GIT-BLOB-SHA: 2a9c6e63ca20f89f4f1580dfc5b37dc6d5978f33
+<Window x:Class="Genesis.UI.MainWindow"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        Title="JOSHUA · GENESIS 0.3.0 | Command Deck" Width="1150" Height="740"
+        MinWidth="900" MinHeight="580" Background="{DynamicResource WindowBg}"
+        Foreground="{DynamicResource MainText}" FontFamily="Segoe UI">
+  <Window.Resources>
+    <SolidColorBrush x:Key="WindowBg" Color="#E5EBEF"/>
+    <SolidColorBrush x:Key="PanelBg" Color="#EEF3F6"/>
+    <SolidColorBrush x:Key="PanelBorder" Color="#CDD9DF"/>
+    <SolidColorBrush x:Key="MainText" Color="#1B3646"/>
+    <SolidColorBrush x:Key="SubText" Color="#516C7B"/>
+    <SolidColorBrush x:Key="Accent" Color="#17899D"/>
+    <SolidColorBrush x:Key="ButtonBg" Color="#E4EDF1"/>
+    <SolidColorBrush x:Key="InputBg" Color="#FAFCFD"/>
+    <Style TargetType="Button">
+      <Setter Property="Background" Value="{DynamicResource ButtonBg}"/>
+      <Setter Property="Foreground" Value="{DynamicResource MainText}"/>
+      <Setter Property="BorderBrush" Value="{DynamicResource PanelBorder}"/>
+      <Setter Property="BorderThickness" Value="1"/>
+      <Setter Property="Padding" Value="12,9"/>
+      <Setter Property="Margin" Value="0,0,8,8"/>
+      <Setter Property="FontWeight" Value="SemiBold"/>
+      <Setter Property="Cursor" Value="Hand"/>
+      <Setter Property="MinHeight" Value="35"/>
+    </Style>
+    <Style TargetType="ListBox">
+      <Setter Property="Background" Value="{DynamicResource InputBg}"/>
+      <Setter Property="Foreground" Value="{DynamicResource MainText}"/>
+      <Setter Property="BorderBrush" Value="{DynamicResource PanelBorder}"/>
+      <Setter Property="BorderThickness" Value="1"/>
+      <Setter Property="Padding" Value="5"/>
+    </Style>
+    <Style TargetType="TextBlock">
+      <Setter Property="Foreground" Value="{DynamicResource MainText}"/>
+    </Style>
+  </Window.Resources>
+  <Grid Margin="18">
+    <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="*"/><RowDefinition Height="Auto"/></Grid.RowDefinitions>
+    <Border Grid.Row="0" Background="{DynamicResource PanelBg}" BorderBrush="{DynamicResource PanelBorder}" BorderThickness="1" CornerRadius="15" Padding="17" Margin="0,0,0,14">
+      <Grid>
+        <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
+        <StackPanel>
+          <TextBlock Text="JOSHUA  /  GENESIS" FontSize="26" FontWeight="SemiBold"/>
+          <TextBlock Text="COMMAND DECK  ·  0.3.0  ·  LOKALER OLLAMA-CHAT" Foreground="{DynamicResource SubText}" FontSize="12" Margin="0,5,0,0"/>
+        </StackPanel>
+        <StackPanel Grid.Column="1" Orientation="Horizontal" VerticalAlignment="Center">
+          <TextBlock Text="DESIGN" VerticalAlignment="Center" Margin="0,0,12,0" Foreground="{DynamicResource SubText}"/>
+          <Button Content="Hell" Click="LightTheme_Click" Margin="0,0,5,0" MinWidth="65"/>
+          <Button Content="Dunkel" Click="DarkTheme_Click" Margin="0" MinWidth="65"/>
+        </StackPanel>
+      </Grid>
+    </Border>
+    <Grid Grid.Row="1">
+      <Grid.ColumnDefinitions>
+        <ColumnDefinition Width="215"/><ColumnDefinition Width="14"/>
+        <ColumnDefinition Width="*"/><ColumnDefinition Width="14"/>
+        <ColumnDefinition Width="255"/>
+      </Grid.ColumnDefinitions>
+      <Border Grid.Column="0" Background="{DynamicResource PanelBg}" BorderBrush="{DynamicResource PanelBorder}" BorderThickness="1" CornerRadius="14" Padding="13">
+        <StackPanel>
+          <TextBlock Text="SYSTEM" FontWeight="SemiBold" FontSize="13" Foreground="{DynamicResource Accent}" Margin="0,4,0,17"/>
+          <TextBlock Text="●  Command Deck" FontWeight="SemiBold" FontSize="15" Margin="0,0,0,16"/>
+          <TextBlock Text="◌  Auftragsverwaltung" FontSize="14" Margin="0,0,0,16"/>
+          <TextBlock Text="◌  Dauerhafte Beschlüsse" FontSize="14" Margin="0,0,0,16"/>
+          <TextBlock Text="◌  Modellanbindung" FontSize="14" Margin="0,0,0,16"/>
+          <Border Height="1" Background="{DynamicResource PanelBorder}" Margin="0,8,0,14"/>
+          <TextBlock Text="AKTUELL" Foreground="{DynamicResource Accent}" FontWeight="SemiBold"/>
+          <TextBlock Text="SQLite · lokale Datenbank" Margin="0,8,0,5" TextWrapping="Wrap"/>
+          <TextBlock Text="Ollama · lokale Modellanbindung" Foreground="{DynamicResource SubText}" TextWrapping="Wrap"/>
+          <Border Height="1" Background="{DynamicResource PanelBorder}" Margin="0,18,0,14"/>
+          <Button Content="Host starten" Click="StartHost_Click"/>
+          <Button Content="Host beenden" Click="StopHost_Click"/>
+          <Button Content="Aktualisieren" Click="Refresh_Click"/>
+        </StackPanel>
+      </Border>
+      <Grid Grid.Column="2">
+        <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="*"/><RowDefinition Height="Auto"/></Grid.RowDefinitions>
+        <Border Grid.Row="0" Background="{DynamicResource PanelBg}" BorderBrush="{DynamicResource PanelBorder}" BorderThickness="1" CornerRadius="14" Padding="16" Margin="0,0,0,12">
+          <StackPanel>
+            <TextBlock Text="AKTIVE AUFGABEN" FontWeight="SemiBold" FontSize="13" Foreground="{DynamicResource Accent}" Margin="0,0,0,10"/>
+            <WrapPanel>
+              <Button Content="10-Schritte-Test starten" Click="StartJob_Click"/>
+              <Button Content="Ausgewählte Aufgabe abbrechen" Click="CancelSelected_Click"/>
+            </WrapPanel>
+          </StackPanel>
+        </Border>
+        <Border Grid.Row="1" Background="{DynamicResource PanelBg}" BorderBrush="{DynamicResource PanelBorder}" BorderThickness="1" CornerRadius="14" Padding="15">
+          <DockPanel>
+            <TextBlock DockPanel.Dock="Top" Text="Aufträge &amp; Fortschritt" FontSize="17" FontWeight="SemiBold" Margin="0,0,0,12"/>
+            <ListBox x:Name="JobsList"/>
+          </DockPanel>
+        </Border>
+        <Border Grid.Row="2" Background="{DynamicResource PanelBg}" BorderBrush="{DynamicResource PanelBorder}" BorderThickness="1" CornerRadius="14" Padding="12" Margin="0,12,0,0" Height="240">
+          <Grid>
+            <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="*"/><RowDefinition Height="Auto"/></Grid.RowDefinitions>
+            <StackPanel Grid.Row="0" Orientation="Horizontal">
+              <TextBlock Text="LOKALER OLLAMA-CHAT" Foreground="{DynamicResource Accent}" FontWeight="SemiBold" VerticalAlignment="Center" Margin="0,0,11,0"/>
+              <ComboBox x:Name="ModelPicker" Width="170" MinHeight="29" Margin="0,0,6,5"/>
+              <Button Content="Modelle laden" Click="LoadModels_Click" Padding="8,5"/>
+            </StackPanel>
+            <TextBox Grid.Row="1" x:Name="ChatOutput" IsReadOnly="True" TextWrapping="Wrap"
+                     VerticalScrollBarVisibility="Auto" Background="{DynamicResource InputBg}"
+                     Foreground="{DynamicResource MainText}" Padding="8" Text="Lokaler Chat bereit, sobald Ollama läuft. Diese Vorschau verarbeitet jeweils eine einzelne Nachricht."/>
+            <Grid Grid.Row="2" Margin="0,7,0,0">
+              <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
+              <TextBox x:Name="ChatInput" Background="{DynamicResource InputBg}" Foreground="{DynamicResource MainText}"
+                       MinHeight="34" Padding="8" MaxLength="16000" ToolTip="Eine Nachricht an das ausgewählte lokale Ollama-Modell"/>
+              <Button x:Name="SendChatButton" Grid.Column="1" Content="Senden" Click="SendChat_Click" Margin="7,0,0,0"/>
+            </Grid>
+          </Grid>
+        </Border>
+      </Grid>
+      <Border Grid.Column="4" Background="{DynamicResource PanelBg}" BorderBrush="{DynamicResource PanelBorder}" BorderThickness="1" CornerRadius="14" Padding="15">
+        <DockPanel>
+          <StackPanel DockPanel.Dock="Bottom" Margin="0,12,0,0">
+            <TextBlock Text="Beschluss speichern" FontSize="13" FontWeight="SemiBold" Margin="0,0,0,7"/>
+            <TextBox x:Name="DecisionInput" Background="{DynamicResource InputBg}" Foreground="{DynamicResource MainText}" MaxLength="2000" MinHeight="62" TextWrapping="Wrap" AcceptsReturn="True" Padding="9" VerticalScrollBarVisibility="Auto"/>
+            <Button Content="Dauerhaft speichern" Click="Remember_Click" Margin="0,9,0,0"/>
+          </StackPanel>
+          <TextBlock DockPanel.Dock="Top" Text="BESCHLÜSSE" FontSize="14" FontWeight="SemiBold" Foreground="{DynamicResource Accent}" Margin="0,0,0,11"/>
+          <ListBox x:Name="DecisionsList"/>
+        </DockPanel>
+      </Border>
+    </Grid>
+    <Border Grid.Row="2" Background="{DynamicResource PanelBg}" BorderBrush="{DynamicResource PanelBorder}" BorderThickness="1" CornerRadius="10" Padding="12" Margin="0,14,0,0">
+      <Grid>
+        <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
+        <TextBlock x:Name="ConnectionText" Text="○  Host-Verbindung wird geprüft" Foreground="{DynamicResource SubText}" FontSize="13"/>
+        <TextBlock Grid.Column="1" Text="GENESIS SPIKE · Entwurfsoberfläche" Foreground="{DynamicResource SubText}" FontSize="12"/>
+      </Grid>
+    </Border>
+  </Grid>
+</Window>
+
+========== END FILE: src/Genesis.UI/MainWindow.xaml ==========
+
+
+========== BEGIN FILE: src/Genesis.UI/MainWindow.xaml.cs ==========
+GIT-BLOB-SHA: a1127b2c42c2582d27c1991ec220d46f93d76036
+using System.Diagnostics;
+using System.IO;
+using System.IO.Pipes;
+using System.Text;
+using System.Text.Json;
+using System.Windows;
+using System.Windows.Threading;
+using System.Windows.Media;
+using Genesis.Contracts;
+
+namespace Genesis.UI;
+
+public partial class MainWindow : Window
+{
+    private readonly DispatcherTimer _timer = new() { Interval = TimeSpan.FromSeconds(1) };
+    private bool _refreshing;
+    private sealed record JobRow(string Id, string Title, string State, int Completed, int Total)
+    {
+        public override string ToString() =>
+            $"{Title}\n{State} – {Completed}/{Total}  ·  {(Id.Length > 8 ? Id[..8] : Id)}";
+    }
+
+    public MainWindow()
+    {
+        InitializeComponent();
+        Loaded += async (_, _) => { await EnsureHostAsync(); await RefreshAsync(); await LoadModelsAsync(); _timer.Start(); };
+        Closed += (_, _) => _timer.Stop(); // Closing the UI MUST NOT terminate the Host.
+        _timer.Tick += async (_, _) => await RefreshAsync();
+    }
+
+    private static async Task<Response> SendAsync(Request request)
+    {
+        using var pipe = new NamedPipeClientStream(".", Protocol.ActivePipeName, PipeDirection.InOut,
+            PipeOptions.Asynchronous | PipeOptions.CurrentUserOnly);
+        await pipe.ConnectAsync(1500);
+        using var writer = new StreamWriter(pipe, new UTF8Encoding(false), leaveOpen: true) { AutoFlush = true };
+        using var reader = new StreamReader(pipe, Encoding.UTF8, leaveOpen: true);
+        await writer.WriteLineAsync(JsonSerializer.Serialize(request, Protocol.WireJson));
+        using var timeout = new CancellationTokenSource(request.Command == "chat" ? TimeSpan.FromMinutes(3) : TimeSpan.FromSeconds(10));
+        var reply = await ReadBoundedReplyAsync(reader, 4 * 1024 * 1024, timeout.Token);
+        return reply is null ? new(false, "Keine Antwort vom Host")
+            : JsonSerializer.Deserialize<Response>(reply, Protocol.WireJson)
+              ?? new(false, "Ungültige Antwort");
+    }
+
+    private static async Task<string?> ReadBoundedReplyAsync(StreamReader reader, int limit, CancellationToken cancellation)
+    {
+        var result = new StringBuilder();
+        var buffer = new char[1];
+        while (true)
+        {
+            var count = await reader.ReadAsync(buffer.AsMemory(), cancellation);
+            if (count == 0) return result.Length == 0 ? null : throw new InvalidDataException("Unvollständige Antwort.");
+            if (buffer[0] == '\n') return result.ToString().TrimEnd('\r');
+            if (result.Length >= limit) throw new InvalidDataException("Host-Antwort überschreitet das Größenlimit.");
+            result.Append(buffer[0]);
+        }
+    }
+
+    private static string? ReadControlToken()
+    {
+        var dataDirectory = (Protocol.TestOverridesEnabled
+            ? Environment.GetEnvironmentVariable("GENESIS_DATA_DIR") : null)
+            ?? Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "JoshuaSpike5Genesis");
+        var path = Path.Combine(dataDirectory, "control.token");
+        return File.Exists(path) ? File.ReadAllText(path).Trim() : null;
+    }
+
+    private static async Task EnsureHostAsync()
+    {
+        try { if ((await SendAsync(new Request("status"))).Success) return; } catch { }
+        var path = Path.GetFullPath(Path.Combine(AppContext.BaseDirectory, "..", "Host", "Genesis.Host.exe"));
+        if (!File.Exists(path)) return;
+        using var process = Process.Start(new ProcessStartInfo(path)
+        {
+            UseShellExecute = false, CreateNoWindow = true
+        });
+        for (var i = 0; i < 15; i++)
+        {
+            await Task.Delay(200);
+            try { if ((await SendAsync(new Request("status"))).Success) return; } catch { }
+            if (process?.HasExited == true) return;
+        }
+    }
+
+    private async Task RefreshAsync()
+    {
+        if (_refreshing) return;
+        _refreshing = true;
+        try
+        {
+            var response = await SendAsync(new Request("status"));
+            ConnectionText.Text = response.Success ? "● " + response.Message : response.Message;
+            if (!response.Success) ClearStateViews();
+            if (response.Data is { } data)
+            {
+                DecisionsList.ItemsSource = data.Decisions.OrderByDescending(x => x.CreatedAt)
+                    .Select(x => $"{x.CreatedAt.LocalDateTime:g}  {x.Text}").ToArray();
+                var selected = (JobsList.SelectedItem as JobRow)?.Id;
+                JobsList.ItemsSource = data.Jobs.OrderByDescending(x => x.CreatedAt)
+                    .Select(x => new JobRow(x.Id, x.Title, x.State, x.Completed, x.Total)).ToArray();
+                JobsList.SelectedItem = JobsList.Items.Cast<JobRow>().FirstOrDefault(x => x.Id == selected);
+            }
+        }
+        catch
+        {
+            ConnectionText.Text = "○ Host nicht erreichbar – Log prüfen";
+            ClearStateViews();
+        }
+        finally { _refreshing = false; }
+    }
+
+    private void ClearStateViews()
+    {
+        DecisionsList.ItemsSource = null;
+        JobsList.ItemsSource = null;
+    }
+
+    private void ApplyTheme(bool dark)
+    {
+        var palette = dark
+            ? new Dictionary<string, string>
+            {
+                ["WindowBg"] = "#161E2A", ["PanelBg"] = "#202C3A",
+                ["PanelBorder"] = "#364858", ["MainText"] = "#E4F0F5",
+                ["SubText"] = "#B3CAD4", ["Accent"] = "#66C1C9",
+                ["ButtonBg"] = "#2B4050", ["InputBg"] = "#162532"
+            }
+            : new Dictionary<string, string>
+            {
+                ["WindowBg"] = "#E5EBEF", ["PanelBg"] = "#EEF3F6",
+                ["PanelBorder"] = "#CDD9DF", ["MainText"] = "#1B3646",
+                ["SubText"] = "#516C7B", ["Accent"] = "#17899D",
+                ["ButtonBg"] = "#E4EDF1", ["InputBg"] = "#FAFCFD"
+            };
+        foreach (var item in palette)
+        {
+            Resources[item.Key] = new SolidColorBrush((Color)ColorConverter.ConvertFromString(item.Value));
+        }
+    }
+
+    private void LightTheme_Click(object sender, RoutedEventArgs e) => ApplyTheme(false);
+    private void DarkTheme_Click(object sender, RoutedEventArgs e) => ApplyTheme(true);
+
+    private async Task LoadModelsAsync()
+    {
+        try
+        {
+            var response = await SendAsync(new Request("models"));
+            if (!response.Success)
+            {
+                ChatOutput.Text = "Ollama: " + response.Message;
+                return;
+            }
+            var selected = ModelPicker.SelectedItem as string;
+            ModelPicker.ItemsSource = response.Models ?? [];
+            if (selected is not null && ModelPicker.Items.Contains(selected))
+                ModelPicker.SelectedItem = selected;
+            else if (ModelPicker.Items.Count > 0)
+                ModelPicker.SelectedIndex = 0;
+            ChatOutput.Text = response.Models?.Length > 0
+                ? "Ollama verbunden. Modell auswählen, Nachricht eingeben und senden."
+                : "Ollama läuft, aber es wurde noch kein Modell gefunden.";
+        }
+        catch (Exception ex) { ChatOutput.Text = "Ollama nicht erreichbar: " + ex.Message; }
+    }
+
+    private async void LoadModels_Click(object sender, RoutedEventArgs e) => await LoadModelsAsync();
+
+    private async void SendChat_Click(object sender, RoutedEventArgs e)
+    {
+        if (ModelPicker.SelectedItem is not string model)
+        {
+            ChatOutput.Text = "Bitte zuerst ein Ollama-Modell auswählen.";
+            return;
+        }
+        if (string.IsNullOrWhiteSpace(ChatInput.Text)) return;
+        var prompt = ChatInput.Text;
+        SendChatButton.IsEnabled = false;
+        ChatOutput.Text = "JOSHUA arbeitet mit " + model + "...";
+        try
+        {
+            var answer = await SendAsync(new Request("chat", Text: prompt, Model: model));
+            ChatOutput.Text = answer.Success ? (answer.ChatText ?? "(Leere Antwort)") : answer.Message;
+            if (answer.Success) ChatInput.Clear();
+        }
+        catch (Exception ex) { ChatOutput.Text = "Chat fehlgeschlagen: " + ex.Message; }
+        finally { SendChatButton.IsEnabled = true; }
+    }
+
+    private async void StartHost_Click(object sender, RoutedEventArgs e)
+    {
+        try { await EnsureHostAsync(); await RefreshAsync(); }
+        catch (Exception ex) { MessageBox.Show(ex.Message, "Host-Start"); }
+    }
+
+    private async void StopHost_Click(object sender, RoutedEventArgs e)
+    {
+        try
+        {
+            var result = await SendAsync(new Request("stop", AuthToken: ReadControlToken()));
+            if (!result.Success) MessageBox.Show(result.Message);
+            await Task.Delay(300);
+            ClearStateViews();
+            await RefreshAsync();
+        }
+        catch (Exception ex) { MessageBox.Show(ex.Message, "Host beenden"); }
+    }
+
+    private async void CancelSelected_Click(object sender, RoutedEventArgs e)
+    {
+        if (JobsList.SelectedItem is not JobRow selected)
+        {
+            MessageBox.Show("Bitte zuerst einen Auftrag auswählen.");
+            return;
+        }
+        try
+        {
+            var result = await SendAsync(new Request("cancel", Id: selected.Id));
+            if (!result.Success) MessageBox.Show(result.Message);
+            await RefreshAsync();
+        }
+        catch (Exception ex) { MessageBox.Show(ex.Message, "Auftrag abbrechen"); }
+    }
+
+    private async void StartJob_Click(object sender, RoutedEventArgs e)
+    {
+        try
+        {
+            var result = await SendAsync(new Request("start-demo"));
+            if (!result.Success) MessageBox.Show(result.Message);
+            await RefreshAsync();
+        }
+        catch (Exception ex) { MessageBox.Show(ex.Message, "Verbindungsfehler"); }
+    }
+
+    private async void Remember_Click(object sender, RoutedEventArgs e)
+    {
+        if (string.IsNullOrWhiteSpace(DecisionInput.Text)) return;
+        try
+        {
+            var result = await SendAsync(new Request("remember", DecisionInput.Text));
+            if (result.Success) DecisionInput.Clear(); else MessageBox.Show(result.Message);
+            await RefreshAsync();
+        }
+        catch (Exception ex) { MessageBox.Show(ex.Message, "Verbindungsfehler"); }
+    }
+
+    private async void Refresh_Click(object sender, RoutedEventArgs e) => await RefreshAsync();
+}
+
+========== END FILE: src/Genesis.UI/MainWindow.xaml.cs ==========
+
+
+========== BEGIN FILE: src/Genesis.Storage/Genesis.Storage.csproj ==========
+GIT-BLOB-SHA: f9f5e7d7ff5827b8a48b29bc6357b616b9b650e9
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup><TargetFramework>net8.0</TargetFramework><Nullable>enable</Nullable><ImplicitUsings>enable</ImplicitUsings></PropertyGroup>
+  <ItemGroup>
+    <PackageReference Include="Microsoft.Data.Sqlite" Version="8.0.11" />
+    <ProjectReference Include="../Genesis.Contracts/Genesis.Contracts.csproj" />
+  </ItemGroup>
+</Project>
+========== END FILE: src/Genesis.Storage/Genesis.Storage.csproj ==========
+
+
+========== BEGIN FILE: src/Genesis.Storage/SnapshotStore.cs ==========
+GIT-BLOB-SHA: a3890cc090d08b9db3c74e4bff1c4621385f0627
+using System.Globalization;
+using Genesis.Contracts;
+using Microsoft.Data.Sqlite;
+
+namespace Genesis.Storage;
+
+/// <summary>
+/// SQLite is the authoritative GENESIS 0.2 state. All decisions/jobs are committed
+/// in a single transaction; interrupted transactions never expose partial snapshots.
+/// </summary>
+public sealed class SnapshotStore : IDisposable
+{
+    private readonly SqliteConnection _connection;
+
+    public SnapshotStore(string dataDirectory)
+    {
+        Directory.CreateDirectory(dataDirectory);
+        var path = Path.Combine(dataDirectory, "genesis.db");
+        _connection = new SqliteConnection(new SqliteConnectionStringBuilder
+        {
+            DataSource = path,
+            Mode = SqliteOpenMode.ReadWriteCreate,
+            Cache = SqliteCacheMode.Private,
+            Pooling = false
+        }.ToString());
+        _connection.Open();
+        Exec("PRAGMA journal_mode=WAL;");
+        Exec("PRAGMA busy_timeout=5000;");
+        Exec("PRAGMA synchronous=FULL;");
+        Exec("CREATE TABLE IF NOT EXISTS metadata (key TEXT PRIMARY KEY, value TEXT NOT NULL);");
+        Exec("CREATE TABLE IF NOT EXISTS decisions (id TEXT PRIMARY KEY, text TEXT NOT NULL, created_at TEXT NOT NULL);");
+        Exec("CREATE TABLE IF NOT EXISTS jobs (id TEXT PRIMARY KEY, title TEXT NOT NULL, state TEXT NOT NULL, completed INTEGER NOT NULL, total INTEGER NOT NULL, created_at TEXT NOT NULL, error TEXT);");
+        var version = GetMeta("schema_version");
+        if (version is not null && version != "1")
+            throw new InvalidDataException("Unsupported SQLite schema " + version);
+    }
+
+    private void Exec(string sql)
+    {
+        using var c = _connection.CreateCommand();
+        c.CommandText = sql;
+        c.ExecuteNonQuery();
+    }
+
+    private string? GetMeta(string key)
+    {
+        using var c = _connection.CreateCommand();
+        c.CommandText = "SELECT value FROM metadata WHERE key=$key";
+        c.Parameters.AddWithValue("$key", key);
+        return c.ExecuteScalar() as string;
+    }
+
+    public Snapshot? Read()
+    {
+        if (GetMeta("initialized") != "1") return null;
+        if (GetMeta("schema_version") != "1")
+            throw new InvalidDataException("Initialized SQLite database has missing or unsupported schema.");
+        var s = new Snapshot { SchemaVersion = 1 };
+        var updated = GetMeta("updated_at");
+        if (updated is not null) s.UpdatedAt = DateTimeOffset.Parse(updated, CultureInfo.InvariantCulture, DateTimeStyles.RoundtripKind);
+        using (var c = _connection.CreateCommand())
+        {
+            c.CommandText = "SELECT id,text,created_at FROM decisions ORDER BY created_at,id";
+            using var r = c.ExecuteReader();
+            while (r.Read())
+                s.Decisions.Add(new Decision(r.GetString(0), r.GetString(1),
+                    DateTimeOffset.Parse(r.GetString(2), CultureInfo.InvariantCulture, DateTimeStyles.RoundtripKind)));
+        }
+        using (var c = _connection.CreateCommand())
+        {
+            c.CommandText = "SELECT id,title,state,completed,total,created_at,error FROM jobs ORDER BY created_at,id";
+            using var r = c.ExecuteReader();
+            while (r.Read())
+                s.Jobs.Add(new Job(r.GetString(0), r.GetString(1), r.GetString(2),
+                    r.GetInt32(3), r.GetInt32(4),
+                    DateTimeOffset.Parse(r.GetString(5), CultureInfo.InvariantCulture, DateTimeStyles.RoundtripKind),
+                    r.IsDBNull(6) ? null : r.GetString(6)));
+        }
+        return s;
+    }
+
+    public void Commit(Snapshot candidate)
+    {
+        if (candidate.SchemaVersion != 1) throw new InvalidDataException("Unsupported Snapshot version.");
+        using var tx = _connection.BeginTransaction();
+        using (var clean = _connection.CreateCommand())
+        {
+            clean.Transaction = tx;
+            clean.CommandText = "DELETE FROM decisions; DELETE FROM jobs;";
+            clean.ExecuteNonQuery();
+        }
+        foreach (var d in candidate.Decisions)
+        {
+            using var c = _connection.CreateCommand();
+            c.Transaction = tx;
+            c.CommandText = "INSERT INTO decisions (id,text,created_at) VALUES ($id,$text,$date)";
+            c.Parameters.AddWithValue("$id", d.Id);
+            c.Parameters.AddWithValue("$text", d.Text);
+            c.Parameters.AddWithValue("$date", d.CreatedAt.ToString("O", CultureInfo.InvariantCulture));
+            c.ExecuteNonQuery();
+        }
+        foreach (var j in candidate.Jobs)
+        {
+            using var c = _connection.CreateCommand();
+            c.Transaction = tx;
+            c.CommandText = @"INSERT INTO jobs (id,title,state,completed,total,created_at,error)
+                VALUES ($id,$title,$state,$completed,$total,$date,$error)";
+            c.Parameters.AddWithValue("$id", j.Id);
+            c.Parameters.AddWithValue("$title", j.Title);
+            c.Parameters.AddWithValue("$state", j.State);
+            c.Parameters.AddWithValue("$completed", j.Completed);
+            c.Parameters.AddWithValue("$total", j.Total);
+            c.Parameters.AddWithValue("$date", j.CreatedAt.ToString("O", CultureInfo.InvariantCulture));
+            c.Parameters.AddWithValue("$error", (object?)j.Error ?? DBNull.Value);
+            c.ExecuteNonQuery();
+        }
+        foreach (var (key,value) in new[] { ("schema_version", "1"), ("updated_at", candidate.UpdatedAt.ToString("O", CultureInfo.InvariantCulture)), ("initialized", "1") })
+        {
+            using var c = _connection.CreateCommand();
+            c.Transaction = tx;
+            c.CommandText = "INSERT INTO metadata(key,value) VALUES ($key,$value) ON CONFLICT(key) DO UPDATE SET value=excluded.value";
+            c.Parameters.AddWithValue("$key", key);
+            c.Parameters.AddWithValue("$value", value);
+            c.ExecuteNonQuery();
+        }
+        tx.Commit();
+    }
+
+    public void Dispose() => _connection.Dispose();
+}
+========== END FILE: src/Genesis.Storage/SnapshotStore.cs ==========
+
+
+========== BEGIN FILE: src/Genesis.Ollama/Genesis.Ollama.csproj ==========
+GIT-BLOB-SHA: 23b6dde6aeee153f6e3c013d305ee3e7a1f2b805
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup><TargetFramework>net8.0</TargetFramework><Nullable>enable</Nullable><ImplicitUsings>enable</ImplicitUsings></PropertyGroup>
+</Project>
+========== END FILE: src/Genesis.Ollama/Genesis.Ollama.csproj ==========
+
+
+========== BEGIN FILE: src/Genesis.Ollama/OllamaClient.cs ==========
+GIT-BLOB-SHA: 952ccc6de820628731a860451258dfd344bcd132
+using System.Net.Http.Json;
+using System.Text.Json;
+
+namespace Genesis.Ollama;
+
+public sealed class OllamaClient : IDisposable
+{
+    private readonly HttpClient _http;
+    private readonly bool _ownsClient;
+    private const int MaxResponseBytes = 2 * 1024 * 1024;
+
+    public OllamaClient(HttpClient? http = null)
+    {
+        _ownsClient = http is null;
+        _http = http ?? new HttpClient
+        {
+            BaseAddress = new Uri("http://127.0.0.1:11434/"),
+            Timeout = TimeSpan.FromMinutes(3)
+        };
+    }
+
+    public async Task<string[]> ModelsAsync(CancellationToken cancellation = default)
+    {
+        using var response = await _http.GetAsync("api/tags", HttpCompletionOption.ResponseHeadersRead, cancellation);
+        response.EnsureSuccessStatusCode();
+        using var json = await ReadBoundedJsonAsync(response.Content, cancellation);
+        if (!json.RootElement.TryGetProperty("models", out var models) || models.ValueKind != JsonValueKind.Array)
+            return [];
+        return models.EnumerateArray().Where(x => x.TryGetProperty("name", out var name) && name.ValueKind == JsonValueKind.String)
+            .Select(x => x.GetProperty("name").GetString()!)
+            .Where(x => !string.IsNullOrWhiteSpace(x))
+            .ToArray();
+    }
+
+    public async Task<string> ChatAsync(string model, string userText, CancellationToken cancellation = default)
+    {
+        if (string.IsNullOrWhiteSpace(model) || model.Length > 160)
+            throw new ArgumentException("Modellname fehlt oder ist zu lang.", nameof(model));
+        if (string.IsNullOrWhiteSpace(userText) || userText.Length > 16000)
+            throw new ArgumentException("Nachricht muss 1 bis 16.000 Zeichen enthalten.", nameof(userText));
+        using var request = new HttpRequestMessage(HttpMethod.Post, "api/chat")
+        {
+            Content = JsonContent.Create(new
+            {
+                model,
+                stream = false,
+                messages = new[] { new { role = "user", content = userText } },
+                options = new { num_predict = 2048 }
+            })
+        };
+        using var response = await _http.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, cancellation);
+        response.EnsureSuccessStatusCode();
+        using var json = await ReadBoundedJsonAsync(response.Content, cancellation);
+        if (!json.RootElement.TryGetProperty("message", out var message) ||
+            !message.TryGetProperty("content", out var content) || content.ValueKind != JsonValueKind.String)
+            throw new InvalidDataException("Ungültige Modellantwort.");
+        return content.GetString() ?? "";
+    }
+
+    private static async Task<JsonDocument> ReadBoundedJsonAsync(HttpContent content, CancellationToken cancellation)
+    {
+        if (content.Headers.ContentLength > MaxResponseBytes)
+            throw new InvalidDataException("Ollama-Antwort überschreitet das Größenlimit.");
+
+        await using var stream = await content.ReadAsStreamAsync(cancellation);
+        using var buffer = new MemoryStream();
+        var chunk = new byte[8192];
+        while (true)
+        {
+            var count = await stream.ReadAsync(chunk.AsMemory(), cancellation);
+            if (count == 0) break;
+            if (buffer.Length + count > MaxResponseBytes)
+                throw new InvalidDataException("Ollama-Antwort überschreitet das Größenlimit.");
+            buffer.Write(chunk, 0, count);
+        }
+        buffer.Position = 0;
+        return await JsonDocument.ParseAsync(buffer, cancellationToken: cancellation);
+    }
+
+    public void Dispose()
+    {
+        if (_ownsClient) _http.Dispose();
+    }
+}
+========== END FILE: src/Genesis.Ollama/OllamaClient.cs ==========
+
+
+========== BEGIN FILE: tests/Genesis.ProtocolSmoke/Genesis.ProtocolSmoke.csproj ==========
+GIT-BLOB-SHA: 454e112236e648326d7496b313a977608e334622
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup><OutputType>Exe</OutputType><TargetFramework>net8.0</TargetFramework><Nullable>enable</Nullable><ImplicitUsings>enable</ImplicitUsings></PropertyGroup>
+  <ItemGroup><ProjectReference Include="../../src/Genesis.Contracts/Genesis.Contracts.csproj" /></ItemGroup>
+</Project>
+
+========== END FILE: tests/Genesis.ProtocolSmoke/Genesis.ProtocolSmoke.csproj ==========
+
+
+========== BEGIN FILE: tests/Genesis.ProtocolSmoke/Program.cs ==========
+GIT-BLOB-SHA: 3019db32798fb147477aca3f980d821ef9bef308
+using System.Text.Json;
+using Genesis.Contracts;
+
+static void Check(bool ok, string reason)
+{
+    if (!ok) throw new Exception(reason);
+}
+
+var request = new Request("remember", "GENESIS test");
+var wire = JsonSerializer.Serialize(request, Protocol.WireJson);
+Check(!wire.Contains('\n') && !wire.Contains('\r'), "Wire protocol must contain exactly one line");
+var roundtrip = JsonSerializer.Deserialize<Request>(wire, Protocol.WireJson);
+Check(roundtrip?.Command == "remember" && roundtrip.Text == "GENESIS test", "Request roundtrip failed");
+
+var snapshot = new Snapshot { Decisions = [new Decision("id1", "A", DateTimeOffset.UtcNow)] };
+var response = new Response(true, "ok", snapshot);
+var responseWire = JsonSerializer.Serialize(response, Protocol.WireJson);
+Check(!responseWire.Contains('\n') && !responseWire.Contains('\r'), "Response must contain exactly one line");
+var responseRoundtrip = JsonSerializer.Deserialize<Response>(responseWire, Protocol.WireJson);
+Check(responseRoundtrip?.Success == true && responseRoundtrip.Data?.SchemaVersion == 1, "Response roundtrip failed");
+Check(responseRoundtrip.Data.Decisions.Count == 1, "Snapshot decision missing");
+
+Console.WriteLine("GENESIS Protocol Smoke: PASS (request, response, schema)");
+
+========== END FILE: tests/Genesis.ProtocolSmoke/Program.cs ==========
+
+
+========== BEGIN FILE: tests/Genesis.IntegrationSmoke/Genesis.IntegrationSmoke.csproj ==========
+GIT-BLOB-SHA: 97178d6839ad82c358dc4b05e6f237dfbe57f1be
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup><OutputType>Exe</OutputType><TargetFramework>net8.0</TargetFramework><Nullable>enable</Nullable><ImplicitUsings>enable</ImplicitUsings></PropertyGroup>
+  <ItemGroup><ProjectReference Include="../../src/Genesis.Contracts/Genesis.Contracts.csproj" /><ProjectReference Include="../../src/Genesis.Storage/Genesis.Storage.csproj" /></ItemGroup>
+</Project>
+
+========== END FILE: tests/Genesis.IntegrationSmoke/Genesis.IntegrationSmoke.csproj ==========
+
+
+========== BEGIN FILE: tests/Genesis.IntegrationSmoke/Program.cs ==========
+GIT-BLOB-SHA: 6cba473e3f90e06cbbff5e09a00c070691361440
+using System.Diagnostics;
+using System.IO.Pipes;
+using System.Text;
+using System.Text.Json;
+using Genesis.Contracts;
+using Microsoft.Data.Sqlite;
+
+if (args.Length != 1 || !File.Exists(args[0])) throw new Exception("Usage: IntegrationSmoke <full Genesis.Host.exe path>");
+var exe = Path.GetFullPath(args[0]);
+var dir = Path.Combine(Path.GetTempPath(), "Genesis-Integration-" + Guid.NewGuid().ToString("N"));
+Directory.CreateDirectory(dir);
+var pipeName = "genesis-ci-" + Guid.NewGuid().ToString("N");
+Process? host = null;
+
+void Check(bool ok, string reason) { if (!ok) throw new Exception(reason); }
+Process Start()
+{
+    var p = new Process { StartInfo = new ProcessStartInfo(exe) { UseShellExecute = false, CreateNoWindow = true } };
+    p.StartInfo.Environment["GENESIS_ALLOW_TEST_OVERRIDES"] = "1";
+    p.StartInfo.Environment["GENESIS_DATA_DIR"] = dir;
+    p.StartInfo.Environment["GENESIS_PIPE_NAME"] = pipeName;
+    if (!p.Start()) throw new Exception("Host process did not start.");
+    return p;
+}
+async Task<Response> RequestAsync(string cmd, string? text = null, string? id = null, string? authToken = null)
+{
+    Exception? last = null;
+    for (var i = 0; i < 15; i++)
+    {
+        try
+        {
+            using var client = new NamedPipeClientStream(".", pipeName, PipeDirection.InOut,
+                PipeOptions.Asynchronous | PipeOptions.CurrentUserOnly);
+            await client.ConnectAsync(500);
+            using var writer = new StreamWriter(client, new UTF8Encoding(false), leaveOpen: true) { AutoFlush = true };
+            using var reader = new StreamReader(client, Encoding.UTF8, leaveOpen: true);
+            await writer.WriteLineAsync(JsonSerializer.Serialize(new Request(cmd, text, id, authToken), Protocol.WireJson));
+            using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+            var line = await reader.ReadLineAsync(timeout.Token);
+            return JsonSerializer.Deserialize<Response>(line ?? throw new Exception("Null response"), Protocol.WireJson)
+                ?? throw new Exception("No response object");
+        }
+        catch (Exception ex) when (ex is IOException or TimeoutException)
+        {
+            last = ex;
+            await Task.Delay(200);
+        }
+    }
+    throw new Exception("Host IPC unreachable", last);
+}
+async Task<Response> RawAsync(string line)
+{
+    using var client = new NamedPipeClientStream(".", pipeName, PipeDirection.InOut, PipeOptions.Asynchronous | PipeOptions.CurrentUserOnly);
+    await client.ConnectAsync(2000);
+    using var writer = new StreamWriter(client, new UTF8Encoding(false), leaveOpen: true) { AutoFlush = true };
+    using var reader = new StreamReader(client, Encoding.UTF8, leaveOpen: true);
+    await writer.WriteLineAsync(line);
+    return JsonSerializer.Deserialize<Response>((await reader.ReadLineAsync())!, Protocol.WireJson)!;
+}
+async Task StopAsync()
+{
+    Check(!(await RequestAsync("stop")).Success, "Unauthenticated stop accepted");
+    var token = File.ReadAllText(Path.Combine(dir, "control.token")).Trim();
+    Check((await RequestAsync("stop", authToken: token)).Success, "Authenticated stop rejected");
+    Check(host is not null, "No host");
+    using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+    await host!.WaitForExitAsync(timeout.Token);
+    Check(host.ExitCode == 0, "Stop exit code " + host.ExitCode);
+    host.Dispose();
+    host = null;
+}
+try
+{
+    // Simulate migration of a real 0.1.x JSON state, preserving the source file.
+    var legacyPath = Path.Combine(dir, "state.json");
+    var legacy = new Snapshot
+    {
+        Decisions = [new Decision("legacy-id", "Legacy imported", DateTimeOffset.UtcNow)],
+        Jobs = []
+    };
+    File.WriteAllText(legacyPath, JsonSerializer.Serialize(legacy, Protocol.Json));
+    host = Start();
+    var initialized = await RequestAsync("status");
+    Check(initialized.Success, "Initial status");
+    Check(initialized.Data!.Decisions.Any(d => d.Text == "Legacy imported"), "Legacy data not imported");
+    Check(File.Exists(legacyPath), "Migration deleted original JSON file");
+    Check(File.Exists(Path.Combine(dir, "genesis.db")), "SQLite database not initialized");
+    // A deliberately stalled client must not block an independent status request.
+    using (var slow = new NamedPipeClientStream(".", pipeName, PipeDirection.InOut,
+        PipeOptions.Asynchronous | PipeOptions.CurrentUserOnly))
+    {
+        await slow.ConnectAsync(2000);
+        await slow.WriteAsync(Encoding.UTF8.GetBytes("{")); // no newline
+        await slow.FlushAsync();
+        var watch = Stopwatch.StartNew();
+        Check((await RequestAsync("status")).Success, "Second client blocked by unfinished first request");
+        Check(watch.Elapsed < TimeSpan.FromSeconds(3), "Slow client blocked Host accept loop");
+    }
+
+    Check(!(await RawAsync("{}")).Success, "Invalid command accepted");
+    Check(!(await RawAsync("{bad json")).Success, "Invalid JSON accepted");
+    // The host must reject an over-limit request without poisoning subsequent clients.
+    using (var oversized = new NamedPipeClientStream(".", pipeName, PipeDirection.InOut,
+        PipeOptions.Asynchronous | PipeOptions.CurrentUserOnly))
+    {
+        await oversized.ConnectAsync(2000);
+        var outgoing = new StreamWriter(oversized, new UTF8Encoding(false), leaveOpen: true) { AutoFlush = true };
+        using var incoming = new StreamReader(oversized, Encoding.UTF8, leaveOpen: true);
+        // Write and read concurrently: the server intentionally stops reading at 64 Ki chars.
+        var writing = outgoing.WriteAsync(new string('Z', 100000));
+        using var maxWait = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+        var largeReply = await incoming.ReadLineAsync(maxWait.Token);
+        try { await writing.WaitAsync(maxWait.Token); } catch (IOException) { /* server closed after rejecting input */ }
+        var largeResponse = JsonSerializer.Deserialize<Response>(largeReply!, Protocol.WireJson);
+        Check(largeResponse is { Success: false }, "Oversize pipe request was not rejected");
+        // Server deliberately closes a rejected oversized request. StreamWriter.Dispose
+        // can flush into that closed pipe; it is an expected condition, not a test failure.
+        try { outgoing.Dispose(); } catch (IOException) { }
+    }
+    Check((await RequestAsync("status")).Success, "Host unusable after oversize request");
+
+    Check(!(await RequestAsync("remember", new string('X', 2001))).Success, "Overlong decision accepted");
+    Check((await RequestAsync("remember", new string('Y', 2000))).Success,
+        "Exactly 2000-character decision rejected");
+    Check(File.Exists(Path.Combine(dir, "genesis.db")), "SQLite database absent after first save");
+    Check(!(await RequestAsync("stop", authToken: "0000000000000000000000000000000000000000000000000000000000000000")).Success,
+        "Wrong control token accepted");
+
+    Check((await RequestAsync("remember", "Persisted")).Success, "Remember failed");
+    var demo = await RequestAsync("start-demo");
+    Check(demo.Success, "Start demo failed");
+    var running = demo.Data!.Jobs.Last();
+    await Task.Delay(2200);
+    var progressed = await RequestAsync("status");
+    var position = progressed.Data!.Jobs.Single(x => x.Id == running.Id).Completed;
+    Check(position >= 1, "No worker progress");
+    // Second host may not take over the same exclusive data directory.
+    using (var duplicate = Start())
+    {
+        using var duplicateTimeout = new CancellationTokenSource(TimeSpan.FromSeconds(5));
+        await duplicate.WaitForExitAsync(duplicateTimeout.Token);
+        Check(duplicate.ExitCode != 0, "Duplicate host accepted");
+    }
+    host.Kill(entireProcessTree: true);
+    await host.WaitForExitAsync();
+    host.Dispose();
+    host = Start();
+    var resumed = (await RequestAsync("status")).Data!.Jobs.Single(x => x.Id == running.Id);
+    Check(resumed.Completed >= position, "Job progress lost after restart");
+    for (var i = 0; i < 20; i++)
+    {
+        var after = (await RequestAsync("status")).Data!.Jobs.Single(x => x.Id == running.Id);
+        if (after.State == "done") break;
+        await Task.Delay(500);
+    }
+    var completed = (await RequestAsync("status")).Data!.Jobs.Single(x => x.Id == running.Id);
+    Check(completed.State == "done" && completed.Completed == 10, "Job did not complete");
+    var cancel = await RequestAsync("start-demo");
+    var secondId = cancel.Data!.Jobs.Last().Id;
+    Check((await RequestAsync("cancel", id: secondId)).Success, "Cancel failed");
+    await Task.Delay(1800);
+    var cancelled = (await RequestAsync("status")).Data!.Jobs.Single(x => x.Id == secondId);
+    Check(cancelled.State == "canceled", "Canceled job continued");
+    await StopAsync();
+    // A restart must continue to use SQLite rather than re-importing stale JSON.
+    host = Start();
+    var sqliteReload = await RequestAsync("status");
+    Check(sqliteReload.Success, "SQLite restart failed");
+    Check(sqliteReload.Data!.Decisions.Any(d => d.Text == "Persisted"), "SQLite data missing on restart");
+    Check(sqliteReload.Data.Decisions.Any(d => d.Text == "Legacy imported"), "Migrated data lost");
+    await StopAsync();
+
+    // An initialized database without a schema version must fail closed rather than
+    // being misinterpreted as a fresh database and reimporting stale legacy JSON.
+    var database = Path.Combine(dir, "genesis.db");
+    using (var db = new SqliteConnection($"Data Source={database};Pooling=False"))
+    {
+        db.Open();
+        using var remove = db.CreateCommand();
+        remove.CommandText = "DELETE FROM metadata WHERE key='schema_version'";
+        Check(remove.ExecuteNonQuery() == 1, "Schema metadata not present before test");
+    }
+    using (var missingSchemaHost = Start())
+    {
+        using var startupTimeout = new CancellationTokenSource(TimeSpan.FromSeconds(5));
+        await missingSchemaHost.WaitForExitAsync(startupTimeout.Token);
+        Check(missingSchemaHost.ExitCode != 0, "Missing schema version accepted");
+    }
+    using (var db = new SqliteConnection($"Data Source={database};Pooling=False"))
+    {
+        db.Open();
+        using var restore = db.CreateCommand();
+        restore.CommandText = "INSERT INTO metadata(key,value) VALUES ('schema_version','1')";
+        restore.ExecuteNonQuery();
+    }
+
+    // Invalid SQLite must stop startup and must never silently fall back to stale JSON.
+    File.WriteAllText(database, "{not a sqlite database");
+    var corruptedBytes = File.ReadAllBytes(database);
+    using (var invalidHost = Start())
+    {
+        using var invalidTimeout = new CancellationTokenSource(TimeSpan.FromSeconds(5));
+        await invalidHost.WaitForExitAsync(invalidTimeout.Token);
+        Check(invalidHost.ExitCode != 0, "Corrupt SQLite should prevent startup");
+        Check(File.ReadAllBytes(database).SequenceEqual(corruptedBytes), "Corrupt database replaced unexpectedly");
+    }
+    Console.WriteLine("GENESIS Integration Smoke PASS: SQLite migration, transactions, restart, jobs, cancellation, concurrency, auth, corrupt database fail-closed");
+
+}
+finally
+{
+    if (host is not null)
+    {
+        try { if (!host.HasExited) host.Kill(entireProcessTree: true); } catch { }
+        host.Dispose();
+    }
+    try { Directory.Delete(dir, recursive: true); } catch { }
+}
+
+========== END FILE: tests/Genesis.IntegrationSmoke/Program.cs ==========
+
+
+========== BEGIN FILE: tests/Genesis.OllamaSmoke/Genesis.OllamaSmoke.csproj ==========
+GIT-BLOB-SHA: e5a6bb068157b198c5070b6c10402bbfa2eb69d0
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup><OutputType>Exe</OutputType><TargetFramework>net8.0</TargetFramework><Nullable>enable</Nullable><ImplicitUsings>enable</ImplicitUsings></PropertyGroup>
+  <ItemGroup><ProjectReference Include="../../src/Genesis.Ollama/Genesis.Ollama.csproj" /></ItemGroup>
+</Project>
+========== END FILE: tests/Genesis.OllamaSmoke/Genesis.OllamaSmoke.csproj ==========
+
+
+========== BEGIN FILE: tests/Genesis.OllamaSmoke/Program.cs ==========
+GIT-BLOB-SHA: 1c77dacb78996c9b250318a5491404be619a43e1
+using System.Net;
+using System.Text;
+using System.Text.Json;
+using Genesis.Ollama;
+
+static void Check(bool ok, string reason)
+{
+    if (!ok) throw new Exception(reason);
+}
+using var handler = new MockOllamaHandler();
+using var http = new HttpClient(handler) { BaseAddress = new Uri("http://127.0.0.1:11434/") };
+using var ollama = new OllamaClient(http);
+var models = await ollama.ModelsAsync();
+Check(models.Length == 2 && models[0] == "qwen3.5:9b", "Ollama model discovery failed");
+var answer = await ollama.ChatAsync("qwen3.5:9b", "Hallo JOSHUA");
+Check(answer == "Hallo! Ich bin lokal.", "Ollama chat response invalid");
+Check(handler.SawPost && handler.ChatModel == "qwen3.5:9b" && handler.ChatPrompt == "Hallo JOSHUA",
+    "Ollama request schema invalid");
+try
+{
+    await ollama.ChatAsync("", "Hallo");
+    throw new Exception("Empty model was accepted");
+}
+catch (ArgumentException) { }
+handler.ChatReplyOverride = "{bad-json";
+try
+{
+    await ollama.ChatAsync("qwen3.5:9b", "Test");
+    throw new Exception("Malformed Ollama JSON unexpectedly accepted");
+}
+catch (JsonException) { }
+handler.ChatReplyOverride = "{\"message\":{\"content\":\"" + new string('A', 2 * 1024 * 1024 + 100) + "\"}}";
+try
+{
+    await ollama.ChatAsync("qwen3.5:9b", "Test");
+    throw new Exception("Oversize Ollama response unexpectedly accepted");
+}
+catch (InvalidDataException) { }
+handler.ChatReplyOverride = null;
+Console.WriteLine("GENESIS Ollama Smoke PASS: model listing, chat schema, response, malformed JSON, bounded payload");
+
+
+sealed class MockOllamaHandler : HttpMessageHandler
+{
+    public bool SawPost { get; private set; }
+    public string? ChatReplyOverride { get; set; }
+    public string? ChatModel { get; private set; }
+    public string? ChatPrompt { get; private set; }
+
+    protected override async Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken)
+    {
+        if (request.Method == HttpMethod.Get && request.RequestUri?.AbsolutePath == "/api/tags")
+        {
+            return Ok("""{"models":[{"name":"qwen3.5:9b"},{"name":"llama3.2:3b"}]}""");
+        }
+        if (request.Method == HttpMethod.Post && request.RequestUri?.AbsolutePath == "/api/chat")
+        {
+            SawPost = true;
+            var raw = await request.Content!.ReadAsStringAsync(cancellationToken);
+            using var doc = JsonDocument.Parse(raw);
+            if (doc.RootElement.GetProperty("stream").GetBoolean()) throw new Exception("Expected non-streamed request");
+            ChatModel = doc.RootElement.GetProperty("model").GetString();
+            var messages = doc.RootElement.GetProperty("messages");
+            ChatPrompt = messages[0].GetProperty("content").GetString();
+            if (messages[0].GetProperty("role").GetString() != "user") throw new Exception("Invalid role");
+            return Ok(ChatReplyOverride ?? """{"message":{"role":"assistant","content":"Hallo! Ich bin lokal."},"done":true}""");
+        }
+        return new HttpResponseMessage(HttpStatusCode.NotFound);
+    }
+
+    private static HttpResponseMessage Ok(string payload) =>
+        new(HttpStatusCode.OK) { Content = new StringContent(payload, Encoding.UTF8, "application/json") };
+}
+
+========== END FILE: tests/Genesis.OllamaSmoke/Program.cs ==========
+
+
+========== BEGIN FILE: scripts/build-release.ps1 ==========
+GIT-BLOB-SHA: 57d34e40c3e355fcbad5d8906065ea929ada23c2
+$ErrorActionPreference = 'Stop'
+$root = Split-Path $PSScriptRoot -Parent
+$out = Join-Path $root 'dist\JoshuaSpike5Genesis-win-x64'
+$hostOut = Join-Path $out 'Host'
+$uiOut = Join-Path $out 'UI'
+if (-not (Get-Command dotnet -ErrorAction SilentlyContinue)) { throw '.NET SDK ist nicht installiert.' }
+New-Item -ItemType Directory -Force $hostOut, $uiOut | Out-Null
+dotnet publish (Join-Path $root 'src\Genesis.Host\Genesis.Host.csproj') -c Release -r win-x64 --self-contained false -o $hostOut
+if ($LASTEXITCODE -ne 0) { throw 'Host-Build fehlgeschlagen.' }
+dotnet publish (Join-Path $root 'src\Genesis.UI\Genesis.UI.csproj') -c Release -r win-x64 --self-contained false -o $uiOut
+if ($LASTEXITCODE -ne 0) { throw 'UI-Build fehlgeschlagen.' }
+foreach ($file in @((Join-Path $hostOut 'Genesis.Host.exe'), (Join-Path $uiOut 'Genesis.UI.exe'), (Join-Path $hostOut 'Genesis.Contracts.dll'))) {
+    if (-not (Test-Path $file)) { throw "Build unvollständig: $file" }
+}
+Write-Host "Build fertig: $out"
+Write-Host "Start: $uiOut\Genesis.UI.exe"
+
+========== END FILE: scripts/build-release.ps1 ==========
+
+========================= END SOURCE =========================
