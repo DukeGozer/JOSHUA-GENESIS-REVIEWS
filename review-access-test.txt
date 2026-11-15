@@ -1,0 +1,16 @@
+PROJECT JOSHUA GENESIS — PUBLIC REPOSITORY READ TEST
+
+REVIEW TEST ID: GENESIS-PUBLIC-ACCESS-2026-11-15
+VERIFY TOKEN: NEBULA-ORBIT-47
+EXPECTED FILE: review-access-test.txt
+
+This is a harmless test document. It contains no source code, secrets, or personal information.
+
+QUESTIONS FOR REVIEWER:
+1. Did you open this exact file directly from the public GitHub repository in this test, rather than relying on chat history?
+2. What is the REVIEW TEST ID?
+3. What is the VERIFY TOKEN?
+4. What is the EXPECTED FILE value?
+5. Which URL or retrieval method did you use? If retrieval failed, say that plainly.
+
+Do not infer or guess any answer. Do not use earlier messages as evidence of direct access.
