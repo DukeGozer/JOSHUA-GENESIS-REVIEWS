@@ -14,7 +14,7 @@ Exakter Quellcommit `78c29129906f03ef6d92dedf0b4c27e66937e106`; Windows-CI **437
 - [**Vollständiges R1-Quellcodepaket (25 Dateien, eine TXT)**](REVIEW_BUNDLE_0.3.1_R1.txt)
 - [**Prüfauftrag**](REVIEW_0.3.1_R1.md)
 
-Exakter Quellcommit `b36c3555619f2b0df4edba7d703211886004dc25`; Windows-CI **43771026013: success** (UI, Host, Protokoll, Ollama-Vertrag, Paketlayout und End-to-End-Integration). R1 ergänzt atomare Chatpersistenz, wiederholbare SQLite-Migration, ehrlichen Abbruchstatus, Wiederherstellung nach Host-Absturz, Quarantäne bei SQLite-Korruption, begrenzten vollständigen Gesprächskontext und UI-Stabilisierung.
+Exakter Quellcommit `b36c3555619f2b0df4edba7d703211886004dc25`; Windows-CI **43771075211: success** (UI, Host, Protokoll, Ollama-Vertrag, Paketlayout und End-to-End-Integration). R1 ergänzt atomare Chatpersistenz, wiederholbare SQLite-Migration, ehrlichen Abbruchstatus, Wiederherstellung nach Host-Absturz, Quarantäne bei SQLite-Korruption, begrenzten vollständigen Gesprächskontext und UI-Stabilisierung.
 
 **Noch keine reale Ollama/Qwen-GPU- oder interaktive WPF-/Mehrmonitor-Abnahme.** Nicht produktionsfreigegeben.
 
