@@ -1,0 +1,24 @@
+# .NET build output
+**/bin/
+**/obj/
+dist/
+artifacts/
+.vs/
+*.user
+*.suo
+
+# Runtime and private content
+state.json
+state.json.*
+host.log
+*.log
+.env
+.env.*
+*.pfx
+*.key
+*.pem
+secrets.*
+F_JOSHUA_DATA/
+THE_HIVE/
+models/
+datasets/
