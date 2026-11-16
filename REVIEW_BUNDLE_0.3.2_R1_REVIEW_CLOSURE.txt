@@ -1,9 +1,9 @@
 PROJECT JOSHUA SPIKE 5.0 GENESIS — COMPLETE SOURCE REVIEW BUNDLE
 VERSION: 0.3.2-R1 REVIEW CLOSURE (DRAFT ALPHA)
 PRIVATE SOURCE REPO: DukeGozer/JOSHUA-SPIKE-5-GENESIS
-EXACT SOURCE COMMIT: 301391e08e679ce73db2f3b79d824e38f99db862
+EXACT SOURCE COMMIT: 7d98a4976012cd14e74edad48749975000597b48
 DRAFT PULL REQUEST: https://github.com/DukeGozer/JOSHUA-SPIKE-5-GENESIS/pull/10
-WINDOWS CI: PENDING / NOT YET VERIFIED FOR THIS EXACT COMMIT
+WINDOWS CI: PENDING FOR THIS EXACT COMMIT
 WINDOWS ARTIFACT: NOT YET VERIFIED FOR THIS EXACT COMMIT
 FILE COUNT: 26
 Each source below is from the exact stated review-closure commit. Windows CI for this updated commit was still pending when this bundle was created. Git blob SHAs and original source paths are retained.
@@ -2147,7 +2147,7 @@ GIT-BLOB-SHA: 97178d6839ad82c358dc4b05e6f237dfbe57f1be
 ========== END FILE: tests/Genesis.IntegrationSmoke/Genesis.IntegrationSmoke.csproj ==========
 
 ========== BEGIN FILE: tests/Genesis.IntegrationSmoke/Program.cs ==========
-GIT-BLOB-SHA: 58625f3ae20bdf625519b5ed94f256689fbcc509
+GIT-BLOB-SHA: abe5b823929d013bcd415310d0d7b7c7d62097e3
 using System.Diagnostics;
 using System.IO.Pipes;
 using System.Text;
@@ -2869,7 +2869,8 @@ try
         await compactStatus.ConnectAsync(2000);
         using var writer = new StreamWriter(compactStatus, new UTF8Encoding(false), leaveOpen:true) { AutoFlush=true };
         using var reader = new StreamReader(compactStatus, Encoding.UTF8, leaveOpen:true);
-        await writer.WriteLineAsync(JsonSerializer.Serialize(new Request("status"), Protocol.WireJson));
+        var compactToken = File.ReadAllText(Path.Combine(dir, "control.token")).Trim();
+        await writer.WriteLineAsync(JsonSerializer.Serialize(new Request("status", AuthToken: compactToken), Protocol.WireJson));
         using var compactTimeout = new CancellationTokenSource(TimeSpan.FromSeconds(10));
         var wire = await reader.ReadLineAsync(compactTimeout.Token);
         Check(wire is not null && Encoding.UTF8.GetByteCount(wire) < 4 * 1024 * 1024,
