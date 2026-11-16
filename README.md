@@ -1,6 +1,15 @@
 # JOSHUA GENESIS – öffentliche Expertenprüfung
 
-## Neueste Expertenprüfung: GENESIS 0.3.2 Stability Candidate
+## Neueste Expertenprüfung: GENESIS 0.3.2-R1 Foundation Hardening
+
+- [**Vollständiges Quellcodepaket (26 Dateien, eine TXT)**](REVIEW_BUNDLE_0.3.2_R1.txt)
+- [**Prüfauftrag für Gemini und Meta**](REVIEW_0.3.2_R1.md)
+
+Exakter geprüfter Quellcommit `f195e0cb43832e77d5fcda2a45a7d08c4627193a`; Windows-CI [**43845776429: SUCCESS**](https://github.com/DukeGozer/JOSHUA-SPIKE-5-GENESIS/actions/runs/43845776429). Draft-PR [#9](https://github.com/DukeGozer/JOSHUA-SPIKE-5-GENESIS/pull/9), nicht gemergt. R1 stabilisiert Host-Shutdown, leere/gekürzte Ollama-Antworten, große Chat-Kontexte, kompakte UI-Statusantworten und die eindeutige Versionskennzeichnung; neue Regressionstests für Parallelität, Stop-Disconnect und große Historien.
+
+**Noch keine reale Qwen-/GPU-, interaktive WPF-, Drei-Monitor-/Misch-DPI- oder Dauerlauf-Abnahme. Nicht produktionsfreigegeben.**
+
+## Vorheriger Reviewstand: GENESIS 0.3.2 Stability Candidate
 
 - [**Vollständiges Quellcodepaket (25 Dateien, eine TXT)**](REVIEW_BUNDLE_0.3.2_STABILITY.txt)
 - [**Prüfauftrag für Gemini und Meta**](REVIEW_0.3.2_STABILITY.md)
