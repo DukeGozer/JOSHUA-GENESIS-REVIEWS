@@ -6,7 +6,7 @@ DRAFT PULL REQUEST: https://github.com/DukeGozer/JOSHUA-SPIKE-5-GENESIS/pull/10
 WINDOWS CI: NOT YET VERIFIED FOR THIS EXACT COMMIT
 WINDOWS ARTIFACT: NOT YET VERIFIED FOR THIS EXACT COMMIT
 FILE COUNT: 26
-Each source below is from the exact CI-tested source commit. Git blob SHAs and original source paths are retained.
+Each source below is from the exact stated review-closure commit. Windows CI for this updated commit was still pending when this bundle was created. Git blob SHAs and original source paths are retained.
 This file is a source review bundle, not an installer. No real GPU or interactive WPF run is implied by CI.
 
 ========== BEGIN FILE: .github/workflows/windows-build.yml ==========
