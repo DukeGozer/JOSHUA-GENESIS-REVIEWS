@@ -1,9 +1,9 @@
 PROJECT JOSHUA GENESIS — COMPLETE 0.3.3-R3 ALPHA SOURCE REVIEW
 STATUS: DRAFT — NO MERGE OR PRODUCTION APPROVAL
 PRIVATE SOURCE REPO: DukeGozer/JOSHUA-SPIKE-5-GENESIS
-EXACT SOURCE COMMIT: c389f93bfe23e8ce24c10d4c5d37c5c564abe075
+EXACT SOURCE COMMIT: 79afb5e1ed4001360b94127ba0369eb48281fdaa
 DRAFT PR: https://github.com/DukeGozer/JOSHUA-SPIKE-5-GENESIS/pull/16
-WINDOWS CI: RUN #339 — PENDING AT SOURCE BUNDLE SYNCHRONIZATION, VERIFY LIVE STATUS
+WINDOWS CI: RUN #341 — IN PROGRESS AT BUNDLE UPDATE; VERIFY LIVE STATUS
 FILE COUNT: 30
 Complete sources and Git blob SHAs. R3 real GPU/rollback tests are PENDING. Previous R2 live 30-minute baseline: 190 responses completed, 49 expected cancels, 10 generation failures (5 repetition and 5 length). Do not infer production safety from Windows CI.
 
@@ -2431,7 +2431,7 @@ GIT-BLOB-SHA: 97178d6839ad82c358dc4b05e6f237dfbe57f1be
 ========== END FILE: tests/Genesis.IntegrationSmoke/Genesis.IntegrationSmoke.csproj ==========
 
 ========== BEGIN FILE: tests/Genesis.IntegrationSmoke/Program.cs ==========
-GIT-BLOB-SHA: 1b590e90f7b53a61f6f5b2a0824a9b656ae7c5b0
+GIT-BLOB-SHA: 982d308117437dd90d8ea170133b9455f6636945
 using System.Diagnostics;
 using System.IO.Pipes;
 using System.Text;
@@ -3371,18 +3371,21 @@ sealed class FakeOllama : IAsyncDisposable
                     var delayThisChat = DelayChat;
                     var failThisChat = FailMidStream;
                     Volatile.Write(ref _lastChatBody, requestBodyText);
+                    using var requestDoc = JsonDocument.Parse(requestBodyText);
+                    var lastUserPrompt = requestDoc.RootElement.GetProperty("messages")
+                        .EnumerateArray().Last().GetProperty("content").GetString() ?? "";
                     if (delayThisChat) await Task.Delay(ChatDelayMs, _stop.Token);
-                    if (requestBodyText.Contains("SimulateEmptyAnswer", StringComparison.Ordinal))
+                    if (lastUserPrompt.Contains("SimulateEmptyAnswer", StringComparison.Ordinal))
                         body = "{\"message\":{\"role\":\"assistant\",\"content\":\"\"},\"done\":true}\n";
-                    else if (requestBodyText.Contains("SimulateLongAnswer", StringComparison.Ordinal))
+                    else if (lastUserPrompt.Contains("SimulateLongAnswer", StringComparison.Ordinal))
                         body = "{\"message\":{\"role\":\"assistant\",\"content\":\"" +
                             new string('L', 4500) + "\"},\"done\":true}\n";
-                    else if (requestBodyText.Contains("SimulateRetryOnce", StringComparison.Ordinal) &&
+                    else if (lastUserPrompt.Contains("SimulateRetryOnce", StringComparison.Ordinal) &&
                         Interlocked.Increment(ref _retryOnceCalls) == 1)
                         body = """{"message":{"role":"assistant","content":"partial"},"done":true,"done_reason":"length"}""" + "\n";
-                    else if (requestBodyText.Contains("SimulateRetryOnce", StringComparison.Ordinal))
+                    else if (lastUserPrompt.Contains("SimulateRetryOnce", StringComparison.Ordinal))
                         body = """{"message":{"role":"assistant","content":"Hallo von Fake-Ollama!"},"done":true}""" + "\n";
-                    else if (requestBodyText.Contains("SimulateTruncatedAnswer", StringComparison.Ordinal))
+                    else if (lastUserPrompt.Contains("SimulateTruncatedAnswer", StringComparison.Ordinal))
                         body = "{\"message\":{\"role\":\"assistant\",\"content\":\"partial\"},\"done\":true,\"done_reason\":\"length\"}\n";
                     else
                         body = failThisChat
