@@ -1,9 +1,9 @@
 PROJECT JOSHUA GENESIS — COMPLETE 0.3.3-R3 ALPHA SOURCE REVIEW
 STATUS: DRAFT — NO MERGE OR PRODUCTION APPROVAL
 PRIVATE SOURCE REPO: DukeGozer/JOSHUA-SPIKE-5-GENESIS
-EXACT SOURCE COMMIT: 7cad60554c68074c134dc096a64b3acbc543372d
+EXACT SOURCE COMMIT: c389f93bfe23e8ce24c10d4c5d37c5c564abe075
 DRAFT PR: https://github.com/DukeGozer/JOSHUA-SPIKE-5-GENESIS/pull/16
-WINDOWS CI: RUN #327 — PENDING AT FIRST PUBLICATION, RECHECK
+WINDOWS CI: RUN #339 — PENDING AT SOURCE BUNDLE SYNCHRONIZATION, VERIFY LIVE STATUS
 FILE COUNT: 30
 Complete sources and Git blob SHAs. R3 real GPU/rollback tests are PENDING. Previous R2 live 30-minute baseline: 190 responses completed, 49 expected cancels, 10 generation failures (5 repetition and 5 length). Do not infer production safety from Windows CI.
 
@@ -102,7 +102,7 @@ GIT-BLOB-SHA: 9ae592e5fe3abc33264dde08ec5621dc580c63c9
 ========== END FILE: src/Genesis.Host/Genesis.Host.csproj ==========
 
 ========== BEGIN FILE: src/Genesis.Host/Program.cs ==========
-GIT-BLOB-SHA: e828682dc2b6277e589aa1ad3e64b2112c9bc101
+GIT-BLOB-SHA: 6f46745da68b9461d67c33c462a59b4624ca9138
 using System.IO.Pipes;
 using System.Text;
 using System.Text.Json;
@@ -703,6 +703,7 @@ internal static class Program
                 decided.Decisions.Add(new Decision(Guid.NewGuid().ToString("N"), request.Text.Trim(), DateTimeOffset.UtcNow));
                 Save(decided);
                 return new(true, "Beschluss gespeichert.", Clone());
+            case "chat-fresh" when Protocol.TestOverridesEnabled:
             case "chat":
                 if (string.IsNullOrWhiteSpace(request.Text) || request.Text.Length > MaxChatPromptChars ||
                     string.IsNullOrWhiteSpace(request.Model) || request.Model.Length > 160)
@@ -718,7 +719,9 @@ internal static class Program
                 try
                 {
                     var now = DateTimeOffset.UtcNow;
-                    var ctx = BuildChatContext(request.Text);
+                    var ctx = request.Command == "chat-fresh"
+                        ? new List<ChatTurn> { new("user", request.Text) }
+                        : BuildChatContext(request.Text);
                     var job = new Job(id, "Ollama: " + request.Model, "queued", 0, 1, now,
                         Kind: "chat", Model: request.Model, Prompt: request.Text);
                     var userMessage = new ChatMessage(Guid.NewGuid().ToString("N"), "main", "user",
@@ -2428,7 +2431,7 @@ GIT-BLOB-SHA: 97178d6839ad82c358dc4b05e6f237dfbe57f1be
 ========== END FILE: tests/Genesis.IntegrationSmoke/Genesis.IntegrationSmoke.csproj ==========
 
 ========== BEGIN FILE: tests/Genesis.IntegrationSmoke/Program.cs ==========
-GIT-BLOB-SHA: e405050b43d2e2ab064ddc04691411959c423aff
+GIT-BLOB-SHA: 1b590e90f7b53a61f6f5b2a0824a9b656ae7c5b0
 using System.Diagnostics;
 using System.IO.Pipes;
 using System.Text;
@@ -2886,6 +2889,22 @@ try
         Check(retryBody.RootElement.GetProperty("options").GetProperty("num_predict").GetInt32() == 4096,
             "Recovery retry did not apply bounded 4096-token budget.");
     }
+
+    // Test-only fresh-context request must not carry previous assistant/user turns.
+    var freshChat = await RequestAsync("chat-fresh", text: "Fresh context isolation", model: "fake-alpha:1b");
+    Check(freshChat.Success, "Test-only fresh chat was rejected.");
+    var freshId = freshChat.Data!.Jobs.Last(j => j.Kind == "chat").Id;
+    Job? freshJob = null;
+    for (var i = 0; i < 60; i++)
+    {
+        freshJob = (await RequestAsync("status")).Data!.Jobs.Single(j => j.Id == freshId);
+        if (freshJob.State is "done" or "failed") break;
+        await Task.Delay(100);
+    }
+    Check(freshJob?.State == "done", "Fresh-context chat did not complete.");
+    using (var freshBody = JsonDocument.Parse(mockOllama.LastChatBody!))
+        Check(freshBody.RootElement.GetProperty("messages").GetArrayLength() == 1,
+            "Fresh-context mode unexpectedly reused previous conversation.");
 
     // Inject exactly one non-terminal progress-write failure after the first
     // streamed chunk. The model stream must continue and the final response commit.
@@ -3774,7 +3793,7 @@ Bestehende SQLite-Migrations-, Atomizitäts-, Recovery-, Abbruch-, Quarantäne- 
 
 ========== END COMPLETE SOURCE BUNDLE ==========
 ========== BEGIN FILE: src/Genesis.UI/SoakRunner.cs ==========
-GIT-BLOB-SHA: 5827b0da7d527fe98e36d04fc4defdea9d63ad91
+GIT-BLOB-SHA: dec52b0fa6a7dbd5f7771ada3646e87a08c43b08
 using System.Diagnostics;
 using System.IO;
 using System.IO.Pipes;
@@ -3790,7 +3809,7 @@ internal static class SoakRunner
 {
     internal sealed record Progress(int Completed, int Failed, int Canceled,
         int ElapsedSeconds, int DurationSeconds, long PeakHostMb, string Detail, string ReportPath);
-    private sealed record TestEntry(DateTimeOffset At, string Kind, string Result, long DurationMs, string? Error);
+    private sealed record TestEntry(DateTimeOffset At, string Kind, string Mode, string Result, long DurationMs, string? Error);
     private sealed record MemorySample(int ElapsedSeconds, long HostWorkingSetMB);
     private static readonly string[] Prompts =
     [
@@ -3898,6 +3917,9 @@ internal static class SoakRunner
                 if (host!.HasExited) throw new InvalidOperationException("Test-Host ist abgestürzt.");
                 SampleMemory();
                 var isCancelTest = iteration % 5 == 4;
+                // Alternate five-minute fresh/history blocks to separate growing-context
+                // failures from isolated responses. This is a comparison, not a diagnosis.
+                var mode = ((int)elapsed.Elapsed.TotalMinutes / 5) % 2 == 0 ? "fresh" : "history";
                 var prompt = Prompts[iteration % Prompts.Length] + " [GENESIS-Stabilitätstest #" + (iteration + 1) + "]";
                 var watch = Stopwatch.StartNew();
                 string kind = isCancelTest ? "cancel" : "chat";
@@ -3905,8 +3927,8 @@ internal static class SoakRunner
                 string? error = null;
                 try
                 {
-                    Update("Test " + (iteration + 1) + ": " + (isCancelTest ? "Abbruch" : "Modellantwort"));
-                    var response = await SendAsync(new Request("chat", Text: prompt, Model: model), cancel);
+                    Update("Test " + (iteration + 1) + " [" + mode + "]: " + (isCancelTest ? "Abbruch" : "Modellantwort"));
+                    var response = await SendAsync(new Request(mode == "fresh" ? "chat-fresh" : "chat", Text: prompt, Model: model), cancel);
                     if (!response.Success) throw new InvalidOperationException(response.Message);
                     var id = response.Data?.Jobs.LastOrDefault(j => j.Kind == "chat")?.Id
                         ?? throw new InvalidDataException("Chat-Auftrag ohne ID.");
@@ -3958,7 +3980,7 @@ internal static class SoakRunner
                     failed++;
                     error = ex.Message;
                 }
-                entries.Add(new TestEntry(DateTimeOffset.UtcNow, kind, result, watch.ElapsedMilliseconds, error));
+                entries.Add(new TestEntry(DateTimeOffset.UtcNow, kind, mode, result, watch.ElapsedMilliseconds, error));
                 iteration++;
                 Update("Test " + iteration + " beendet: " + result + (error is null ? "" : " – " + error));
                 await Task.Delay(TimeSpan.FromSeconds(2), cancel);
@@ -4010,6 +4032,12 @@ internal static class SoakRunner
                 Failures = failed,
                 PeakHostWorkingSetMB = peakHostMb,
                 HostMemorySamples = memorySamples,
+                ContextComparison = entries.GroupBy(e => e.Mode).Select(g => new {
+                    Mode = g.Key, Total = g.Count(), Successes = g.Count(e => e.Result == "done"),
+                    Cancellations = g.Count(e => e.Result == "canceled"),
+                    Failures = g.Count(e => e.Result == "failed"),
+                    AverageDurationMs = g.Average(e => e.DurationMs)
+                }).ToArray(),
                 ErrorCategories = entries.Where(e => e.Error is not null && e.Result != "canceled")
                     .GroupBy(e => e.Error!).Select(g => new { Message = g.Key, Count = g.Count() }).ToArray(),
                 Error = fatal,
@@ -4027,11 +4055,12 @@ internal static class SoakRunner
                 .AppendLine($"Antworten OK: {successful}; Abbrüche: {canceled}; Fehler: {failed}")
                 .AppendLine($"Maximaler Host-Arbeitsspeicher: {peakHostMb} MB")
                 .AppendLine("Host-Speicher-Samples: " + memorySamples.Count)
+                .AppendLine("Kontextvergleich: 5-Minuten-Intervalle fresh/history (nur explorativ).")
                 .AppendLine("Hinweis: Kein Ollama-/GPU-/VRAM-Messwert.")
                 .AppendLine()
                 .AppendLine("Fehler (ausführliche Einträge in report.json):");
             foreach (var item in entries.Where(e => e.Error is not null && e.Result != "canceled"))
-                summary.AppendLine($"[{item.At:O}] {item.Kind} {item.DurationMs} ms: {item.Error}");
+                summary.AppendLine($"[{item.At:O}] {item.Kind}/{item.Mode} {item.DurationMs} ms: {item.Error}");
             if (fatal is not null) summary.AppendLine("Abbruchgrund: " + fatal);
             await File.WriteAllTextAsync(Path.Combine(folder, "summary.txt"), summary.ToString());
             Update("Abschlussbericht gespeichert: " + reportPath);
@@ -4042,7 +4071,7 @@ internal static class SoakRunner
 ========== END FILE: src/Genesis.UI/SoakRunner.cs ==========
 
 ========== BEGIN FILE: README.md ==========
-GIT-BLOB-SHA: 3aec66fad2e55f5ce390b79159e8499c86d64c41
+GIT-BLOB-SHA: 8e65f4beff46e22826beb02fcefa207134185a16
 # PROJECT JOSHUA – GENESIS (Alpha 0.3.3-R3)
 
 Eigenständige Greenfield-Neuentwicklung; kein importierter JOSHUA NEXT/R57-Quellcode.
@@ -4079,7 +4108,7 @@ Berichte:
 und `summary.txt`, inklusive mindestens alle 10 Sekunden erhobener
 **Host**-Working-Set-Messungen. Diese messen weder Ollama noch VRAM.
 
-Nach Ollama-Ausgaben `token repeat limit reached` oder `done_reason=length`
+Zur Ursachenanalyse wechselt der Test in Fünf-Minuten-Intervallen zwischen\nfrischem Kontext (test-only chat-fresh) und normaler Gesprächshistorie.\nDer Vergleich ist explorativ und ersetzt keine kontrollierte Kausalanalyse.\n\nNach Ollama-Ausgaben `token repeat limit reached` oder `done_reason=length`
 erfolgt höchstens ein Neuversuch mit dem aktuellen Benutzerprompt ohne ältere
 Unterhaltung und 4096 maximalen Vorhersagetokens. Der vorherige Teiltext
 wird nicht als gültige endgültige Antwort weitergeführt. Andere Fehler werden
@@ -4088,7 +4117,7 @@ nicht automatisch wiederholt.
 ## Native Updater (erste Alpha-Stufe)
 
 Der Updater öffnet keine Konsole, verlangt eine **lokal ausgewählte ZIP**
-und eine *unabhängig bereitgestellte* SHA-256-Prüfsumme.
+und eine *unabhängig bereitgestellte* SHA-256-Prüfsumme.\nDas Update wird als lokale Kopie verifiziert, bevor die ZIP entpackt wird;\nEintragszahl, entpackte Datenmenge, Pfadtraversal und Symlinks werden geprüft.
 Er verweigert den Austausch bei abweichender Prüfsumme oder laufendem GENESIS.
 Er ersetzt nur `Host/`, `UI/` und `Genesis.Launcher.exe`, hält den
 Updater selbst sowie `%LOCALAPPDATA%` unangetastet und sichert vor dem
@@ -4124,7 +4153,7 @@ GIT-BLOB-SHA: 560a1e01a29a44a47227092b19516ba5547721e3
 ========== END FILE: src/Genesis.Updater/Genesis.Updater.csproj ==========
 
 ========== BEGIN FILE: src/Genesis.Updater/Program.cs ==========
-GIT-BLOB-SHA: ad59d8b0ac060f91f92e67f488e0b2f16f7f5a8b
+GIT-BLOB-SHA: 3b2c63abde9392651ce65b526a056eaa52c9e813
 using System.Diagnostics;
 using System.Drawing;
 using System.IO.Compression;
@@ -4269,19 +4298,42 @@ internal sealed class UpdateWindow : Form
         try
         {
             _progress.Value = 10;
-            Log("Berechne SHA-256 des ausgewählten Pakets …");
+            // Stage a private copy first: the file verified by SHA-256 is exactly
+            // the file extracted, even if the original download changes later.
+            Directory.CreateDirectory(temp);
+            var verifiedArchive = Path.Combine(temp, "verified-update.zip");
+            var payload = Path.Combine(temp, "payload");
+            await Task.Run(() => File.Copy(archive, verifiedArchive, overwrite: false));
+            Log("Berechne SHA-256 des unveränderlichen Paket-Abbilds …");
             var actual = await Task.Run(() =>
             {
-                using var input = File.OpenRead(archive);
+                using var input = File.OpenRead(verifiedArchive);
                 return Convert.ToHexString(SHA256.HashData(input));
             });
             if (!CryptographicOperations.FixedTimeEquals(Convert.FromHexString(actual), Convert.FromHexString(sha)))
                 throw new InvalidDataException("Prüfsumme stimmt NICHT überein. Update verweigert.");
             Log("SHA-256 korrekt.");
             _progress.Value = 25;
-            Directory.CreateDirectory(temp);
-            await Task.Run(() => ZipFile.ExtractToDirectory(archive, temp, overwriteFiles: false));
-            var source = temp;
+            await Task.Run(() =>
+            {
+                using var zip = ZipFile.OpenRead(verifiedArchive);
+                if (zip.Entries.Count > 3000) throw new InvalidDataException("ZIP enthält zu viele Einträge.");
+                long total = 0;
+                foreach (var entry in zip.Entries)
+                {
+                    var parts = entry.FullName.Replace('\\', '/').Split('/');
+                    if (Path.IsPathRooted(entry.FullName) || parts.Any(part => part == ".." || part.Contains(':')))
+                        throw new InvalidDataException("ZIP enthält einen ungültigen Dateipfad.");
+                    if (((entry.ExternalAttributes >> 16) & 0xF000) == 0xA000)
+                        throw new InvalidDataException("Symbolische Links in Updatepaketen sind nicht erlaubt.");
+                    total = checked(total + entry.Length);
+                    if (total > 750L * 1024 * 1024)
+                        throw new InvalidDataException("ZIP ist entpackt zu groß.");
+                }
+                Directory.CreateDirectory(payload);
+                zip.ExtractToDirectory(payload, overwriteFiles: false);
+            });
+            var source = payload;
             if (!File.Exists(Path.Combine(source, "Genesis.Launcher.exe")))
             {
                 var candidates = Directory.GetDirectories(temp);
