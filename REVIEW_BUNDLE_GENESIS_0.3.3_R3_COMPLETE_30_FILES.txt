@@ -102,7 +102,7 @@ GIT-BLOB-SHA: 9ae592e5fe3abc33264dde08ec5621dc580c63c9
 ========== END FILE: src/Genesis.Host/Genesis.Host.csproj ==========
 
 ========== BEGIN FILE: src/Genesis.Host/Program.cs ==========
-GIT-BLOB-SHA: c54a3e1a39287ef667b834a6780f27781c633457
+GIT-BLOB-SHA: e828682dc2b6277e589aa1ad3e64b2112c9bc101
 using System.IO.Pipes;
 using System.Text;
 using System.Text.Json;
@@ -518,12 +518,36 @@ internal static class Program
         {
             source.Token.ThrowIfCancellationRequested();
             TrySetChatState(id, "running");
-            await foreach (var chunk in LocalModel.ChatStreamAsync(model, context, source.Token))
+            // Recover at most once from a known Ollama generation limit or repetition fault.
+            // The retry uses the same current user prompt without accumulated conversation
+            // history, preventing a failed partial answer from becoming the new context.
+            // All other failures, including transport and persistence errors, fail normally.
+            for (var attempt = 0; attempt < 2; attempt++)
             {
-                buffer.Append(chunk);
-                if ((DateTime.UtcNow - lastSaved).TotalMilliseconds >= 400)
+                source.Token.ThrowIfCancellationRequested();
+                try
                 {
-                    TrySetChatState(id, "running", buffer.ToString());
+                    var retryContext = attempt == 0 ? context : new List<ChatTurn> { context.Last() };
+                    var predictionBudget = attempt == 0 ? 2048 : 4096;
+                    await foreach (var chunk in LocalModel.ChatStreamAsync(model, retryContext,
+                        source.Token, predictionBudget))
+                    {
+                        buffer.Append(chunk);
+                        if ((DateTime.UtcNow - lastSaved).TotalMilliseconds >= 400)
+                        {
+                            TrySetChatState(id, "running", buffer.ToString());
+                            lastSaved = DateTime.UtcNow;
+                        }
+                    }
+                    break;
+                }
+                catch (InvalidDataException ex) when (attempt == 0 &&
+                    (ex.Message.Contains("token repeat limit reached", StringComparison.OrdinalIgnoreCase) ||
+                     ex.Message.Contains("Generierungslimits gekürzt", StringComparison.OrdinalIgnoreCase)))
+                {
+                    Log("Ollama bounded retry without historical turns after: " + ex.Message);
+                    buffer.Clear();
+                    TrySetChatState(id, "running", "");
                     lastSaved = DateTime.UtcNow;
                 }
             }
@@ -1034,13 +1058,48 @@ public partial class App : Application { }
 ========== END FILE: src/Genesis.UI/App.xaml.cs ==========
 
 ========== BEGIN FILE: src/Genesis.UI/MainWindow.xaml ==========
-GIT-BLOB-SHA: 3c073791d35df4cf03fc06eebe0dd4eb849caa09
+GIT-BLOB-SHA: 1fdf273982cb86203730c02433a418c01be75d2d
 <Window x:Class="Genesis.UI.MainWindow"
         xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
-        Title="JOSHUA · GENESIS 0.3.2-R1 | Command Deck" Width="1150" Height="740"
+        Title="JOSHUA · GENESIS 0.3.3-R3 | Command Deck" Width="1150" Height="740"
         MinWidth="900" MinHeight="580" Background="{DynamicResource WindowBg}"
         Foreground="{DynamicResource MainText}" FontFamily="Segoe UI">
+  <!-- JOSHUA mark: legible at 16/24/32 px in the Windows taskbar. -->
+  <Window.Icon>
+    <DrawingImage>
+      <DrawingImage.Drawing>
+        <DrawingGroup>
+          <GeometryDrawing Brush="#183342">
+            <GeometryDrawing.Geometry>
+              <RectangleGeometry Rect="0,0,64,64" RadiusX="14" RadiusY="14"/>
+            </GeometryDrawing.Geometry>
+          </GeometryDrawing>
+          <GeometryDrawing Brush="#17899D">
+            <GeometryDrawing.Geometry>
+              <EllipseGeometry Center="48,16" RadiusX="5" RadiusY="5"/>
+            </GeometryDrawing.Geometry>
+          </GeometryDrawing>
+          <GeometryDrawing>
+            <GeometryDrawing.Pen>
+              <Pen Brush="#E9F7FA" Thickness="8" StartLineCap="Round" EndLineCap="Round" LineJoin="Round"/>
+            </GeometryDrawing.Pen>
+            <GeometryDrawing.Geometry>
+              <PathGeometry Figures="M 40,16 L 40,39 C 40,49 33,53 25,50 C 20,48 17,44 17,39"/>
+            </GeometryDrawing.Geometry>
+          </GeometryDrawing>
+          <GeometryDrawing>
+            <GeometryDrawing.Pen>
+              <Pen Brush="#36CBD4" Thickness="3" StartLineCap="Round" EndLineCap="Round"/>
+            </GeometryDrawing.Pen>
+            <GeometryDrawing.Geometry>
+              <LineGeometry StartPoint="18,39" EndPoint="18,43"/>
+            </GeometryDrawing.Geometry>
+          </GeometryDrawing>
+        </DrawingGroup>
+      </DrawingImage.Drawing>
+    </DrawingImage>
+  </Window.Icon>
   <Window.Resources>
     <SolidColorBrush x:Key="WindowBg" Color="#E5EBEF"/>
     <SolidColorBrush x:Key="PanelBg" Color="#EEF3F6"/>
@@ -1079,7 +1138,7 @@ GIT-BLOB-SHA: 3c073791d35df4cf03fc06eebe0dd4eb849caa09
         <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
         <StackPanel>
           <TextBlock Text="JOSHUA  /  GENESIS" FontSize="26" FontWeight="SemiBold"/>
-          <TextBlock Text="COMMAND DECK  ·  0.3.2-R1  ·  PERSISTENTER LOKALER CHAT" Foreground="{DynamicResource SubText}" FontSize="12" Margin="0,5,0,0"/>
+          <TextBlock Text="COMMAND DECK  ·  0.3.3-R3  ·  PERSISTENTER LOKALER CHAT" Foreground="{DynamicResource SubText}" FontSize="12" Margin="0,5,0,0"/>
         </StackPanel>
         <StackPanel Grid.Column="1" Orientation="Horizontal" VerticalAlignment="Center">
           <TextBlock Text="DESIGN" VerticalAlignment="Center" Margin="0,0,12,0" Foreground="{DynamicResource SubText}"/>
@@ -1109,6 +1168,7 @@ GIT-BLOB-SHA: 3c073791d35df4cf03fc06eebe0dd4eb849caa09
           <Button Content="Host starten" Click="StartHost_Click"/>
           <Button Content="Host beenden" Click="StopHost_Click"/>
           <Button Content="Aktualisieren" Click="Refresh_Click"/>
+          <Button Content="GENESIS Updater" Click="OpenUpdater_Click"/>
         </StackPanel>
       </Border>
       <Grid Grid.Column="2">
@@ -1128,6 +1188,7 @@ GIT-BLOB-SHA: 3c073791d35df4cf03fc06eebe0dd4eb849caa09
               </ComboBox>
               <Button x:Name="StartSoakButton" Content="Automatisch starten" Click="StartSoak_Click" Padding="8,5"/>
               <Button x:Name="StopSoakButton" Content="Test stoppen" Click="StopSoak_Click" IsEnabled="False" Padding="8,5"/>
+              <Button Content="Berichtsordner öffnen" Click="OpenSoakReports_Click" Padding="8,5"/>
             </WrapPanel>
             <TextBlock x:Name="SoakProgressText" Text="Noch kein Stufe-2-Test gestartet (separater Host, echte Ollama-Aufrufe)."
                        FontSize="12" Foreground="{DynamicResource SubText}" TextWrapping="Wrap"/>
@@ -1205,7 +1266,7 @@ GIT-BLOB-SHA: 3c073791d35df4cf03fc06eebe0dd4eb849caa09
 ========== END FILE: src/Genesis.UI/MainWindow.xaml ==========
 
 ========== BEGIN FILE: src/Genesis.UI/MainWindow.xaml.cs ==========
-GIT-BLOB-SHA: 47984270ed7c869f75ce248036964e61e4c36ab4
+GIT-BLOB-SHA: d97172a3c24881807965353b4dba1a7b78f34a88
 using System.Diagnostics;
 using System.IO;
 using System.IO.Pipes;
@@ -1691,6 +1752,32 @@ public partial class MainWindow : Window
         _soakCancel?.Cancel();
     }
 
+    private void OpenSoakReports_Click(object sender, RoutedEventArgs e)
+    {
+        var dir = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
+            "JoshuaSpike5Genesis", "SoakReports");
+        Directory.CreateDirectory(dir);
+        try { Process.Start(new ProcessStartInfo(dir) { UseShellExecute = true }); }
+        catch (Exception ex) { MessageBox.Show(this, ex.Message, "GENESIS · Berichtsordner"); }
+    }
+
+    private void OpenUpdater_Click(object sender, RoutedEventArgs e)
+    {
+        if (_soakRunning)
+        {
+            MessageBox.Show(this, "Bitte zuerst den Stabilitätstest abschließen.", "GENESIS Updater");
+            return;
+        }
+        var path = Path.GetFullPath(Path.Combine(AppContext.BaseDirectory, "..", "Updater", "Genesis.Updater.exe"));
+        if (!File.Exists(path))
+        {
+            MessageBox.Show(this, "Updater wurde nicht im Paket gefunden:\n" + path, "GENESIS Updater");
+            return;
+        }
+        try { Process.Start(new ProcessStartInfo(path) { UseShellExecute = true, WorkingDirectory = Path.GetDirectoryName(path)! }); }
+        catch (Exception ex) { MessageBox.Show(this, ex.Message, "GENESIS Updater"); }
+    }
+
     private async void StartHost_Click(object sender, RoutedEventArgs e)
     {
         try { await EnsureHostAsync(); await RefreshAsync(); }
@@ -2103,7 +2190,7 @@ GIT-BLOB-SHA: e7fa8cbdfe1a099569ab82729804e3f41a955f68
 ========== END FILE: src/Genesis.Ollama/Genesis.Ollama.csproj ==========
 
 ========== BEGIN FILE: src/Genesis.Ollama/OllamaClient.cs ==========
-GIT-BLOB-SHA: b7e24a88322ed00a6739890edbdb1c32fa59af89
+GIT-BLOB-SHA: 541c5f27335ec606897c962811940687599f48fd
 using System.Net.Http.Json;
 using System.Text.Json;
 using System.Runtime.CompilerServices;
@@ -2176,10 +2263,12 @@ public sealed class OllamaClient : IDisposable
 
     public async IAsyncEnumerable<string> ChatStreamAsync(
         string model, IReadOnlyList<ChatTurn> messages,
-        [EnumeratorCancellation] CancellationToken cancellation = default)
+        [EnumeratorCancellation] CancellationToken cancellation = default, int maxPredictionTokens = 2048)
     {
         if (string.IsNullOrWhiteSpace(model) || model.Length > 160)
             throw new ArgumentException("Modellname fehlt oder ist zu lang.", nameof(model));
+        if (maxPredictionTokens is < 128 or > 4096)
+            throw new ArgumentOutOfRangeException(nameof(maxPredictionTokens));
         if (messages.Count == 0 || messages.Count > 40 ||
             messages.Any(m => m.Role is not ("user" or "assistant" or "system")
                 || string.IsNullOrWhiteSpace(m.Content) || m.Content.Length > 16000))
@@ -2192,7 +2281,7 @@ public sealed class OllamaClient : IDisposable
                 stream = true,
                 messages = messages.Select(m => new { role = m.Role, content = m.Content }).ToArray(),
                 think = false,
-                options = new { num_predict = 2048, num_ctx = 8192 }
+                options = new { num_predict = maxPredictionTokens, num_ctx = 8192 }
             })
         };
         using var response = await _http.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, cancellation);
@@ -2339,7 +2428,7 @@ GIT-BLOB-SHA: 97178d6839ad82c358dc4b05e6f237dfbe57f1be
 ========== END FILE: tests/Genesis.IntegrationSmoke/Genesis.IntegrationSmoke.csproj ==========
 
 ========== BEGIN FILE: tests/Genesis.IntegrationSmoke/Program.cs ==========
-GIT-BLOB-SHA: abe5b823929d013bcd415310d0d7b7c7d62097e3
+GIT-BLOB-SHA: e405050b43d2e2ab064ddc04691411959c423aff
 using System.Diagnostics;
 using System.IO.Pipes;
 using System.Text;
@@ -2776,6 +2865,28 @@ try
         truncatedJob.Error?.Contains("Generierungslimits") == true,
         "Ollama done_reason=length was not reported as a failed truncated answer");
 
+    // Known Ollama length failures may recover once using only the current user turn
+    // and a larger bounded prediction budget. The old partial answer must disappear.
+    var retryChat = await RequestAsync("chat", text: "SimulateRetryOnce", model: "fake-alpha:1b");
+    Check(retryChat.Success, "Retry fixture chat not accepted");
+    var retryId = retryChat.Data!.Jobs.Last(j => j.Kind == "chat").Id;
+    Job? retryJob = null;
+    for (var i = 0; i < 60; i++)
+    {
+        retryJob = (await RequestAsync("status")).Data!.Jobs.Single(j => j.Id == retryId);
+        if (retryJob.State is "done" or "failed") break;
+        await Task.Delay(100);
+    }
+    Check(retryJob?.State == "done" && retryJob.Result == "Hallo von Fake-Ollama!",
+        "Single clean-context retry failed or retained a truncated answer.");
+    using (var retryBody = JsonDocument.Parse(mockOllama.LastChatBody!))
+    {
+        Check(retryBody.RootElement.GetProperty("messages").GetArrayLength() == 1,
+            "Recovery retry kept accumulated history.");
+        Check(retryBody.RootElement.GetProperty("options").GetProperty("num_predict").GetInt32() == 4096,
+            "Recovery retry did not apply bounded 4096-token budget.");
+    }
+
     // Inject exactly one non-terminal progress-write failure after the first
     // streamed chunk. The model stream must continue and the final response commit.
     await StopAsync();
@@ -3158,6 +3269,7 @@ sealed class FakeOllama : IAsyncDisposable
     public volatile bool DelayChat;
     public volatile int ChatDelayMs = 5000;
     public volatile bool FailMidStream;
+    private int _retryOnceCalls;
     private string? _lastChatBody;
     public string? LastChatBody => Volatile.Read(ref _lastChatBody);
 
@@ -3246,6 +3358,11 @@ sealed class FakeOllama : IAsyncDisposable
                     else if (requestBodyText.Contains("SimulateLongAnswer", StringComparison.Ordinal))
                         body = "{\"message\":{\"role\":\"assistant\",\"content\":\"" +
                             new string('L', 4500) + "\"},\"done\":true}\n";
+                    else if (requestBodyText.Contains("SimulateRetryOnce", StringComparison.Ordinal) &&
+                        Interlocked.Increment(ref _retryOnceCalls) == 1)
+                        body = """{"message":{"role":"assistant","content":"partial"},"done":true,"done_reason":"length"}""" + "\n";
+                    else if (requestBodyText.Contains("SimulateRetryOnce", StringComparison.Ordinal))
+                        body = """{"message":{"role":"assistant","content":"Hallo von Fake-Ollama!"},"done":true}""" + "\n";
                     else if (requestBodyText.Contains("SimulateTruncatedAnswer", StringComparison.Ordinal))
                         body = "{\"message\":{\"role\":\"assistant\",\"content\":\"partial\"},\"done\":true,\"done_reason\":\"length\"}\n";
                     else
@@ -3430,26 +3547,28 @@ sealed class MockOllamaHandler : HttpMessageHandler
 ========== END FILE: tests/Genesis.OllamaSmoke/Program.cs ==========
 
 ========== BEGIN FILE: scripts/build-release.ps1 ==========
-GIT-BLOB-SHA: 9c4973446ce5f57473d6dc2e23255f63f8af9351
+GIT-BLOB-SHA: 02a0bff38bb0f2251ccfed227665548df1658287
 $ErrorActionPreference = 'Stop'
 $root = Split-Path $PSScriptRoot -Parent
 $out = Join-Path $root 'dist\JoshuaSpike5Genesis-win-x64'
 $hostOut = Join-Path $out 'Host'
 $uiOut = Join-Path $out 'UI'
+$updaterOut = Join-Path $out 'Updater'
 if (-not (Get-Command dotnet -ErrorAction SilentlyContinue)) { throw '.NET SDK ist nicht installiert.' }
-New-Item -ItemType Directory -Force $hostOut, $uiOut | Out-Null
+New-Item -ItemType Directory -Force $hostOut, $uiOut, $updaterOut | Out-Null
 dotnet publish (Join-Path $root 'src\Genesis.Host\Genesis.Host.csproj') -c Release -r win-x64 --self-contained false -o $hostOut
 if ($LASTEXITCODE -ne 0) { throw 'Host-Build fehlgeschlagen.' }
 dotnet publish (Join-Path $root 'src\Genesis.UI\Genesis.UI.csproj') -c Release -r win-x64 --self-contained false -o $uiOut
 if ($LASTEXITCODE -ne 0) { throw 'UI-Build fehlgeschlagen.' }
 dotnet publish (Join-Path $root 'src\Genesis.Launcher\Genesis.Launcher.csproj') -c Release -r win-x64 --self-contained false -o $out
 if ($LASTEXITCODE -ne 0) { throw 'GUI-Starter-Build fehlgeschlagen.' }
-foreach ($file in @((Join-Path $hostOut 'Genesis.Host.exe'), (Join-Path $uiOut 'Genesis.UI.exe'), (Join-Path $hostOut 'Genesis.Contracts.dll'), (Join-Path $out 'Genesis.Launcher.exe'))) {
+dotnet publish (Join-Path $root 'src\Genesis.Updater\Genesis.Updater.csproj') -c Release -r win-x64 --self-contained false -o $updaterOut
+if ($LASTEXITCODE -ne 0) { throw 'Updater-Build fehlgeschlagen.' }
+foreach ($file in @((Join-Path $hostOut 'Genesis.Host.exe'), (Join-Path $uiOut 'Genesis.UI.exe'), (Join-Path $hostOut 'Genesis.Contracts.dll'), (Join-Path $out 'Genesis.Launcher.exe'), (Join-Path $updaterOut 'Genesis.Updater.exe'))) {
     if (-not (Test-Path $file)) { throw "Build unvollständig: $file" }
 }
 Write-Host "Build fertig: $out"
 Write-Host "Start ohne Konsole: $out\Genesis.Launcher.exe"
-
 ========== END FILE: scripts/build-release.ps1 ==========
 
 ========== BEGIN FILE: src/Genesis.Launcher/Genesis.Launcher.csproj ==========
@@ -3655,7 +3774,7 @@ Bestehende SQLite-Migrations-, Atomizitäts-, Recovery-, Abbruch-, Quarantäne- 
 
 ========== END COMPLETE SOURCE BUNDLE ==========
 ========== BEGIN FILE: src/Genesis.UI/SoakRunner.cs ==========
-GIT-BLOB-SHA: 8af5091d2d28233ddbdc71dcd987131fe3dc0b80
+GIT-BLOB-SHA: 5827b0da7d527fe98e36d04fc4defdea9d63ad91
 using System.Diagnostics;
 using System.IO;
 using System.IO.Pipes;
@@ -3672,6 +3791,7 @@ internal static class SoakRunner
     internal sealed record Progress(int Completed, int Failed, int Canceled,
         int ElapsedSeconds, int DurationSeconds, long PeakHostMb, string Detail, string ReportPath);
     private sealed record TestEntry(DateTimeOffset At, string Kind, string Result, long DurationMs, string? Error);
+    private sealed record MemorySample(int ElapsedSeconds, long HostWorkingSetMB);
     private static readonly string[] Prompts =
     [
         "Antworte in drei Sätzen: Warum war der Commodore Amiga 1985 bemerkenswert?",
@@ -3695,6 +3815,8 @@ internal static class SoakRunner
         var hostPath = Path.GetFullPath(Path.Combine(AppContext.BaseDirectory, "..", "Host", "Genesis.Host.exe"));
         var started = DateTimeOffset.UtcNow;
         var entries = new List<TestEntry>();
+        var memorySamples = new List<MemorySample>();
+        var lastMemorySample = -10;
         var successful = 0;
         var failed = 0;
         var canceled = 0;
@@ -3703,6 +3825,18 @@ internal static class SoakRunner
         Process? host = null;
         var elapsed = Stopwatch.StartNew();
         var duration = TimeSpan.FromMinutes(durationMinutes);
+        void SampleMemory()
+        {
+            if (host is null || host.HasExited) return;
+            host.Refresh();
+            var mb = host.WorkingSet64 / (1024 * 1024);
+            peakHostMb = Math.Max(peakHostMb, mb);
+            if ((int)elapsed.Elapsed.TotalSeconds - lastMemorySample >= 10)
+            {
+                lastMemorySample = (int)elapsed.Elapsed.TotalSeconds;
+                memorySamples.Add(new MemorySample(lastMemorySample, mb));
+            }
+        }
         void Update(string detail)
         {
             progress(new Progress(successful, failed, canceled, (int)elapsed.Elapsed.TotalSeconds,
@@ -3762,8 +3896,7 @@ internal static class SoakRunner
             {
                 cancel.ThrowIfCancellationRequested();
                 if (host!.HasExited) throw new InvalidOperationException("Test-Host ist abgestürzt.");
-                host.Refresh();
-                peakHostMb = Math.Max(peakHostMb, host.WorkingSet64 / (1024 * 1024));
+                SampleMemory();
                 var isCancelTest = iteration % 5 == 4;
                 var prompt = Prompts[iteration % Prompts.Length] + " [GENESIS-Stabilitätstest #" + (iteration + 1) + "]";
                 var watch = Stopwatch.StartNew();
@@ -3783,8 +3916,7 @@ internal static class SoakRunner
                     {
                         cancel.ThrowIfCancellationRequested();
                         await Task.Delay(500, cancel);
-                        host.Refresh();
-                        peakHostMb = Math.Max(peakHostMb, host.WorkingSet64 / (1024 * 1024));
+                        SampleMemory();
                         Update("Test " + (iteration + 1) + " · " + (isCancelTest ? "Abbruchkontrolle" : "Modell antwortet") + " …");
                         var status = await SendAsync(new Request("status"), cancel);
                         if (!status.Success) throw new InvalidOperationException(status.Message);
@@ -3877,12 +4009,31 @@ internal static class SoakRunner
                 Cancellations = canceled,
                 Failures = failed,
                 PeakHostWorkingSetMB = peakHostMb,
+                HostMemorySamples = memorySamples,
+                ErrorCategories = entries.Where(e => e.Error is not null && e.Result != "canceled")
+                    .GroupBy(e => e.Error!).Select(g => new { Message = g.Key, Count = g.Count() }).ToArray(),
                 Error = fatal,
                 DataDirectory = folder,
                 Entries = entries
             };
             await File.WriteAllTextAsync(reportPath,
                 JsonSerializer.Serialize(report, new JsonSerializerOptions { WriteIndented = true }));
+            var summary = new StringBuilder();
+            summary.AppendLine("JOSHUA GENESIS – STABILITÄTSTEST STUFE 2")
+                .AppendLine("Modell: " + model)
+                .AppendLine("Beginn (UTC): " + started.ToString("O"))
+                .AppendLine("Dauer: " + elapsed.Elapsed.ToString(@"hh\:mm\:ss"))
+                .AppendLine("Normal beendet: " + report.CompletedNormally)
+                .AppendLine($"Antworten OK: {successful}; Abbrüche: {canceled}; Fehler: {failed}")
+                .AppendLine($"Maximaler Host-Arbeitsspeicher: {peakHostMb} MB")
+                .AppendLine("Host-Speicher-Samples: " + memorySamples.Count)
+                .AppendLine("Hinweis: Kein Ollama-/GPU-/VRAM-Messwert.")
+                .AppendLine()
+                .AppendLine("Fehler (ausführliche Einträge in report.json):");
+            foreach (var item in entries.Where(e => e.Error is not null && e.Result != "canceled"))
+                summary.AppendLine($"[{item.At:O}] {item.Kind} {item.DurationMs} ms: {item.Error}");
+            if (fatal is not null) summary.AppendLine("Abbruchgrund: " + fatal);
+            await File.WriteAllTextAsync(Path.Combine(folder, "summary.txt"), summary.ToString());
             Update("Abschlussbericht gespeichert: " + reportPath);
         }
         return reportPath;
