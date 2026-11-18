@@ -1,7 +1,7 @@
 PROJECT JOSHUA SPIKE 5.0 GENESIS — COMPLETE SOURCE REVIEW BUNDLE
 VERSION: GENESIS ALPHA AUTOMATED SOAK RUNNER (DRAFT)
 PRIVATE SOURCE REPO: DukeGozer/JOSHUA-SPIKE-5-GENESIS
-EXACT SOURCE COMMIT: 4d13aee3d453dfa4e3236265345ee9973a88085e
+EXACT SOURCE COMMIT: 469a8bc0bf664266e88e6c5f9190538dd408291a
 DRAFT PULL REQUEST: https://github.com/DukeGozer/JOSHUA-SPIKE-5-GENESIS/pull/14
 WINDOWS CI: NOT YET VERIFIED FOR THIS EXACT COMMIT
 WINDOWS ARTIFACT: NOT YET VERIFIED FOR THIS EXACT COMMIT
@@ -1208,7 +1208,7 @@ GIT-BLOB-SHA: 3c073791d35df4cf03fc06eebe0dd4eb849caa09
 ========== END FILE: src/Genesis.UI/MainWindow.xaml ==========
 
 ========== BEGIN FILE: src/Genesis.UI/MainWindow.xaml.cs ==========
-GIT-BLOB-SHA: f7a9f3ecd1113292bf213c1c44cb743693394a67
+GIT-BLOB-SHA: 47984270ed7c869f75ce248036964e61e4c36ab4
 using System.Diagnostics;
 using System.IO;
 using System.IO.Pipes;
@@ -1253,7 +1253,14 @@ public partial class MainWindow : Window
             catch (Exception ex) { ConnectionText.Text = "○ GENESIS-Startproblem: " + ex.Message; }
             finally { _timer.Start(); }
         };
-        Closed += (_, _) => { _timer.Stop(); _soakCancel?.Cancel(); }; // Normal Host remains running.
+        Closing += (_, e) =>
+        {
+            if (!_soakRunning) return;
+            e.Cancel = true;
+            MessageBox.Show(this, "Bitte zuerst den automatischen Stabilitätstest mit \"Test stoppen\" beenden. Dadurch wird der Abschlussbericht gesichert.",
+                "GENESIS · Stabilitätstest", MessageBoxButton.OK, MessageBoxImage.Information);
+        };
+        Closed += (_, _) => _timer.Stop(); // Closing the UI MUST NOT terminate the regular Host.
         _timer.Tick += async (_, _) => await RefreshAsync();
     }
 
@@ -3651,7 +3658,7 @@ Bestehende SQLite-Migrations-, Atomizitäts-, Recovery-, Abbruch-, Quarantäne- 
 
 ========== END COMPLETE SOURCE BUNDLE ==========
 ========== BEGIN FILE: src/Genesis.UI/SoakRunner.cs ==========
-GIT-BLOB-SHA: 4cc55dda33c5327de21a1ca7b00068bd0472b6bf
+GIT-BLOB-SHA: 8af5091d2d28233ddbdc71dcd987131fe3dc0b80
 using System.Diagnostics;
 using System.IO;
 using System.IO.Pipes;
@@ -3779,6 +3786,9 @@ internal static class SoakRunner
                     {
                         cancel.ThrowIfCancellationRequested();
                         await Task.Delay(500, cancel);
+                        host.Refresh();
+                        peakHostMb = Math.Max(peakHostMb, host.WorkingSet64 / (1024 * 1024));
+                        Update("Test " + (iteration + 1) + " · " + (isCancelTest ? "Abbruchkontrolle" : "Modell antwortet") + " …");
                         var status = await SendAsync(new Request("status"), cancel);
                         if (!status.Success) throw new InvalidOperationException(status.Message);
                         var job = status.Data?.Jobs.SingleOrDefault(j => j.Id == id)
