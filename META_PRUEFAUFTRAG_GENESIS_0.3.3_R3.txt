@@ -1,6 +1,6 @@
 PROJECT JOSHUA GENESIS 0.3.3-R3 — UNABHÄNGIGER PRÜFAUFTRAG AN META
 Stand: 18. November 2026
-Exact source commit: 7cad60554c68074c134dc096a64b3acbc543372d
+Exact source commit: c389f93bfe23e8ce24c10d4c5d37c5c564abe075
 Kompletter Code (30 eindeutig markierte Quelldateien):
 https://github.com/DukeGozer/JOSHUA-GENESIS-REVIEWS/blob/main/REVIEW_BUNDLE_GENESIS_0.3.3_R3_COMPLETE_30_FILES.txt
 
@@ -20,7 +20,7 @@ NEUE R3-Version hat noch KEINEN echten 30-Minuten-GPU-Lauf und KEINEN echten Upd
 PRÜFBEREICHE
 1. Bei RunChatAsync: Single-Retry für repetition/length, Streaming-Puffer, Anzeige-/SQLite-Fortschrittszustand, Modell-Lease, Abbruch-/Shutdown-Race, Antwortintegrität, Originalkontext und eventuell fälschlich erfolgreich markierte Resultate.
 2. Bei OllamaClient.ChatStreamAsync: Optionen (2048/4096), Kontextgrenzen, done_reason, Streamfehler, Timeout, Cancellation, nicht begrenzte Nachrichtenlängen und vollständig erkannte Fehler.
-3. Bei SoakRunner: 30/60-Minuten-Ablauf, absichtliche Abbrüche, Fehlerzähler, Speicher-Zeitreihe, Berichte in JSON und summary.txt, Stop Cleanup, Report-Write bei Dateisystemfehlern, Endlosschleifen und Fortschritt der WPF-Oberfläche.
+3. Bei SoakRunner: test-only chat-fresh vs normale Historie im 5-Minuten-Wechsel, korrekte Isolation des Kontexts und aussagekräftige Vergleichszähler; 30/60-Minuten-Ablauf, absichtliche Abbrüche, Fehlerzähler, Speicher-Zeitreihe, Berichte in JSON und summary.txt, Stop Cleanup, Report-Write bei Dateisystemfehlern, Endlosschleifen und Fortschritt der WPF-Oberfläche.
 4. Beim WinForms-Genesis.Updater: Installation aus ZIP, SHA256-Prüfung und deren Vertrauensanker, Zip-Slip/Symlinks, Berechtigungen, Disk-Full, gesperrte Dateien, Prozessrennen, Verzeichnismoves, Rollback bei Teilaustausch, beschädigte Sicherungen, parallele Updater, persistente Daten, Launcher und getrennte Updater-Dateien, Pfad-Symlinks/Junctions, Wiederanlauf bei Crash, Datensicherung und mögliche Benutzer-Fehlbedienung.
 5. Bei Windows UI: Taskbar-Window.Icon, Anzeige von Diagnose, Berichtsordner, Updaterstart, Window-Close während Soak, Main-Thread/Dispatcher, Themes, UAC/SmartScreen.
 6. Bei CI und Release: Prüfe ob Windows-Integration die neuen Fehlerpfade wirklich ausführt, ob ZIP und updater.exe enthalten sind, und welche negativen Tests fehlen.
