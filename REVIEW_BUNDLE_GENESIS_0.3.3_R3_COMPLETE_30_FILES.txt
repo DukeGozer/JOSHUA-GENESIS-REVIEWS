@@ -4040,3 +4040,332 @@ internal static class SoakRunner
     }
 }
 ========== END FILE: src/Genesis.UI/SoakRunner.cs ==========
+
+========== BEGIN FILE: README.md ==========
+GIT-BLOB-SHA: 3aec66fad2e55f5ce390b79159e8499c86d64c41
+# PROJECT JOSHUA – GENESIS (Alpha 0.3.3-R3)
+
+Eigenständige Greenfield-Neuentwicklung; kein importierter JOSHUA NEXT/R57-Quellcode.
+
+## Aktueller Entwicklungszweig
+
+GENESIS Alpha R3 mit SQLite-Persistenz, lokalem Ollama, WPF Command Deck,
+eigenem Taskleisten-Monogramm, isoliertem 30/60-Minuten-Stabilitätstest
+und eigenständigem grafischen Windows-Updater.
+
+**Freigabe:** Entwurf / unabhängiges Review. Ein erfolgreicher Windows-CI-Build
+ist kein Ersatz für einen realen Test auf dem Windows-Rechner des Nutzers.
+
+## Windows-Build
+
+`pwsh -File scripts/build-release.ps1`
+
+Ausgabe: `dist/JoshuaSpike5Genesis-win-x64/` mit:
+- `Genesis.Launcher.exe`: GUI-Starter
+- `UI/Genesis.UI.exe`: Command Deck
+- `Host/Genesis.Host.exe`: lokaler Host
+- `Updater/Genesis.Updater.exe`: unabhängiger Native Updater
+
+Benötigt die .NET 8 Desktop Runtime und ein erreichbares lokales Ollama.
+
+## Stabilitätstest
+
+Command Deck → `Stabilitätstest Stufe 2` → 30 oder 60 Minuten.
+Der Test verwendet einen separaten Host mit eigener SQLite-Datenbank und echter
+lokaler Ollama-Anbindung. Kontrollierte Abbrüche sind **erwartete Testergebnisse**.
+
+Berichte:
+`%LOCALAPPDATA%\JoshuaSpike5Genesis\SoakReports\<lauf>\report.json`
+und `summary.txt`, inklusive mindestens alle 10 Sekunden erhobener
+**Host**-Working-Set-Messungen. Diese messen weder Ollama noch VRAM.
+
+Nach Ollama-Ausgaben `token repeat limit reached` oder `done_reason=length`
+erfolgt höchstens ein Neuversuch mit dem aktuellen Benutzerprompt ohne ältere
+Unterhaltung und 4096 maximalen Vorhersagetokens. Der vorherige Teiltext
+wird nicht als gültige endgültige Antwort weitergeführt. Andere Fehler werden
+nicht automatisch wiederholt.
+
+## Native Updater (erste Alpha-Stufe)
+
+Der Updater öffnet keine Konsole, verlangt eine **lokal ausgewählte ZIP**
+und eine *unabhängig bereitgestellte* SHA-256-Prüfsumme.
+Er verweigert den Austausch bei abweichender Prüfsumme oder laufendem GENESIS.
+Er ersetzt nur `Host/`, `UI/` und `Genesis.Launcher.exe`, hält den
+Updater selbst sowie `%LOCALAPPDATA%` unangetastet und sichert vor dem
+Dateiaustausch die vorige Programmversion in einem benachbarten Ordner.
+Fehler während des Austauschs lösen den Versuch eines Rollbacks aus.
+
+**Noch nicht enthalten:** automatische Abfrage privater GitHub-Updates,
+digitale Code-Signatur, automatisches Schließen laufender GENESIS-Prozesse,
+automatische Wiederherstellung nach späterem Laufzeitdefekt und freigegebene
+Migrationstests. Ein manuelles Windows-Probeupdate mit Rückwegtest steht aus.
+
+## Veröffentlichung
+
+Die GitHub-Branches/PRs sind Entwürfe. Ein echter GPU-Dauerlauf der neuen
+R3-Fassung, Qualitätsprüfung und unabhängiges Meta-Review stehen vor einer
+Freigabe. Niemals fremde vertrauliche Quellen, Token oder Laufzeitdaten ins
+öffentliche Quellcode-Reviewpaket aufnehmen.
+========== END FILE: README.md ==========
+
+========== BEGIN FILE: src/Genesis.Updater/Genesis.Updater.csproj ==========
+GIT-BLOB-SHA: 560a1e01a29a44a47227092b19516ba5547721e3
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net8.0-windows</TargetFramework>
+    <UseWindowsForms>true</UseWindowsForms>
+    <EnableWindowsTargeting>true</EnableWindowsTargeting>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Version>0.3.3</Version>
+  </PropertyGroup>
+</Project>
+========== END FILE: src/Genesis.Updater/Genesis.Updater.csproj ==========
+
+========== BEGIN FILE: src/Genesis.Updater/Program.cs ==========
+GIT-BLOB-SHA: ad59d8b0ac060f91f92e67f488e0b2f16f7f5a8b
+using System.Diagnostics;
+using System.Drawing;
+using System.IO.Compression;
+using System.Security.Cryptography;
+using System.Text;
+using System.Windows.Forms;
+
+namespace Genesis.Updater;
+
+internal static class Program
+{
+    [STAThread]
+    private static void Main()
+    {
+        ApplicationConfiguration.Initialize();
+        Application.Run(new UpdateWindow());
+    }
+}
+
+// Updater intentionally lives in its own /Updater folder.
+// It never replaces its own executable or touches %LOCALAPPDATA% persistence.
+internal sealed class UpdateWindow : Form
+{
+    private readonly string _installation;
+    private readonly TextBox _package = new() { ReadOnly = true, Dock = DockStyle.Fill };
+    private readonly TextBox _sha = new() { Dock = DockStyle.Fill, PlaceholderText = "64-stellige SHA-256-Prüfsumme (Pflicht)" };
+    private readonly TextBox _log = new() { Multiline = true, ReadOnly = true, ScrollBars = ScrollBars.Vertical,
+        Dock = DockStyle.Fill, BackColor = Color.FromArgb(238, 243, 246) };
+    private readonly Button _install = new() { Text = "Paket prüfen und aktualisieren", Enabled = false, AutoSize = true };
+    private readonly Button _choose = new() { Text = "ZIP auswählen", AutoSize = true };
+    private readonly Button _launch = new() { Text = "JOSHUA starten", AutoSize = true };
+    private readonly ProgressBar _progress = new() { Dock = DockStyle.Fill, Minimum = 0, Maximum = 100 };
+    private bool _busy;
+
+    internal UpdateWindow()
+    {
+        _installation = Path.GetFullPath(Path.Combine(AppContext.BaseDirectory, ".."));
+        Text = "JOSHUA GENESIS · Native Updater";
+        Width = 790; Height = 550; MinimumSize = new Size(650, 440);
+        StartPosition = FormStartPosition.CenterScreen;
+        BackColor = Color.FromArgb(229, 235, 239);
+        ForeColor = Color.FromArgb(27, 54, 70);
+        Font = new Font("Segoe UI", 10);
+        var panel = new TableLayoutPanel { Dock = DockStyle.Fill, Padding = new Padding(18),
+            ColumnCount = 2, RowCount = 8 };
+        panel.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 170));
+        panel.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
+        panel.RowStyles.Add(new RowStyle(SizeType.Absolute, 50));
+        panel.RowStyles.Add(new RowStyle(SizeType.Absolute, 40));
+        panel.RowStyles.Add(new RowStyle(SizeType.Absolute, 44));
+        panel.RowStyles.Add(new RowStyle(SizeType.Absolute, 44));
+        panel.RowStyles.Add(new RowStyle(SizeType.Absolute, 50));
+        panel.RowStyles.Add(new RowStyle(SizeType.Absolute, 35));
+        panel.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
+        panel.RowStyles.Add(new RowStyle(SizeType.Absolute, 44));
+        var title = new Label { Text = "GENESIS  /  UPDATER", Font = new Font("Segoe UI", 19, FontStyle.Bold),
+            Dock = DockStyle.Fill, TextAlign = ContentAlignment.MiddleLeft };
+        panel.Controls.Add(title, 0, 0); panel.SetColumnSpan(title, 2);
+        var destination = new Label { Text = "Installation: " + _installation, AutoEllipsis = true,
+            Dock = DockStyle.Fill, TextAlign = ContentAlignment.MiddleLeft };
+        panel.Controls.Add(destination, 0, 1); panel.SetColumnSpan(destination, 2);
+        panel.Controls.Add(new Label { Text = "Paket (ZIP)", Dock = DockStyle.Fill, TextAlign = ContentAlignment.MiddleLeft }, 0, 2);
+        var pkgRow = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 2 };
+        pkgRow.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
+        pkgRow.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
+        pkgRow.Controls.Add(_package, 0, 0); pkgRow.Controls.Add(_choose, 1, 0);
+        panel.Controls.Add(pkgRow, 1, 2);
+        panel.Controls.Add(new Label { Text = "SHA-256", Dock = DockStyle.Fill, TextAlign = ContentAlignment.MiddleLeft }, 0, 3);
+        panel.Controls.Add(_sha, 1, 3);
+        var disclaimer = new Label { Text = "Nur Pakete aus einer vertrauenswürdigen Quelle verwenden. Prüfsumme unabhängig vergleichen. " +
+            "Der Updater verändert keine persönlichen Daten. JOSHUA muss vor dem Austausch geschlossen sein.",
+            AutoSize = false, Dock = DockStyle.Fill };
+        panel.Controls.Add(disclaimer, 0, 4); panel.SetColumnSpan(disclaimer, 2);
+        panel.Controls.Add(_progress, 0, 5); panel.SetColumnSpan(_progress, 2);
+        panel.Controls.Add(_log, 0, 6); panel.SetColumnSpan(_log, 2);
+        var buttons = new FlowLayoutPanel { Dock = DockStyle.Fill, FlowDirection = FlowDirection.RightToLeft };
+        buttons.Controls.Add(_install); buttons.Controls.Add(_launch);
+        panel.Controls.Add(buttons, 0, 7); panel.SetColumnSpan(buttons, 2);
+        Controls.Add(panel);
+        _choose.Click += (_, _) =>
+        {
+            using var dialog = new OpenFileDialog { Title = "Verifiziertes GENESIS-Update auswählen",
+                Filter = "Windows ZIP-Pakete (*.zip)|*.zip" };
+            if (dialog.ShowDialog(this) == DialogResult.OK) _package.Text = dialog.FileName;
+            _install.Enabled = File.Exists(_package.Text) && !_busy;
+        };
+        _install.Click += async (_, _) => await InstallAsync();
+        _launch.Click += (_, _) => Launch();
+        FormClosing += (_, e) => { if (_busy) { e.Cancel = true; MessageBox.Show(this,
+            "Das Update läuft. Bitte den Abschluss und die Sicherung abwarten."); } };
+        Log("Bereit. Wähle eine ZIP und gib die unabhängig erhaltene SHA-256-Prüfsumme ein.");
+    }
+
+    private void Log(string message)
+    {
+        _log.AppendText($"[{DateTime.Now:HH:mm:ss}] {message}{Environment.NewLine}");
+    }
+
+    private void Launch()
+    {
+        var exe = Path.Combine(_installation, "Genesis.Launcher.exe");
+        if (!File.Exists(exe)) { Log("Launcher nicht gefunden."); return; }
+        try { Process.Start(new ProcessStartInfo(exe) { UseShellExecute = true, WorkingDirectory = _installation }); }
+        catch (Exception ex) { Log("Start fehlgeschlagen: " + ex.Message); }
+    }
+
+    private static bool AppIsRunning() =>
+        Process.GetProcessesByName("Genesis.UI").Any() ||
+        Process.GetProcessesByName("Genesis.Host").Any() ||
+        Process.GetProcessesByName("Genesis.Launcher").Any();
+
+    private async Task InstallAsync()
+    {
+        if (_busy) return;
+        var archive = _package.Text;
+        var sha = _sha.Text.Trim().Replace(" ", "").ToUpperInvariant();
+        if (!File.Exists(archive)) { Log("ZIP existiert nicht."); return; }
+        if (sha.Length != 64 || sha.Any(c => !Uri.IsHexDigit(c)))
+        {
+            MessageBox.Show(this, "Für ein sicheres Update muss die 64-stellige SHA-256-Prüfsumme vorliegen.",
+                "Prüfsumme erforderlich", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+            return;
+        }
+        if (AppIsRunning())
+        {
+            MessageBox.Show(this, "Bitte das Command Deck schließen und den GENESIS-Host über 'Host stoppen' beenden. " +
+                "Anschließend das Update erneut starten. Laufende Anwendungen werden niemals gewaltsam beendet.",
+                "GENESIS läuft noch", MessageBoxButtons.OK, MessageBoxIcon.Information);
+            return;
+        }
+        if (MessageBox.Show(this, "Das Paket wird geprüft, die vorhandenen Programmdateien werden gesichert " +
+            "und anschließend ersetzt. Persönliche Daten bleiben unberührt. Update starten?",
+            "GENESIS aktualisieren", MessageBoxButtons.YesNo, MessageBoxIcon.Question) != DialogResult.Yes) return;
+
+        _busy = true; _install.Enabled = false; _choose.Enabled = false; _launch.Enabled = false;
+        var parent = Directory.GetParent(_installation)?.FullName ?? throw new InvalidOperationException("Kein Installationsverzeichnis.");
+        var temp = Path.Combine(parent, ".genesis-stage-" + Guid.NewGuid().ToString("N"));
+        string? backup = null;
+        var installed = new List<string>();
+        var saved = new List<string>();
+        string[] items = ["Host", "UI", "Genesis.Launcher.exe"];
+        try
+        {
+            _progress.Value = 10;
+            Log("Berechne SHA-256 des ausgewählten Pakets …");
+            var actual = await Task.Run(() =>
+            {
+                using var input = File.OpenRead(archive);
+                return Convert.ToHexString(SHA256.HashData(input));
+            });
+            if (!CryptographicOperations.FixedTimeEquals(Convert.FromHexString(actual), Convert.FromHexString(sha)))
+                throw new InvalidDataException("Prüfsumme stimmt NICHT überein. Update verweigert.");
+            Log("SHA-256 korrekt.");
+            _progress.Value = 25;
+            Directory.CreateDirectory(temp);
+            await Task.Run(() => ZipFile.ExtractToDirectory(archive, temp, overwriteFiles: false));
+            var source = temp;
+            if (!File.Exists(Path.Combine(source, "Genesis.Launcher.exe")))
+            {
+                var candidates = Directory.GetDirectories(temp);
+                if (candidates.Length == 1 && File.Exists(Path.Combine(candidates[0], "Genesis.Launcher.exe")))
+                    source = candidates[0];
+            }
+            // Strict package allow-list. Do not run installation scripts from downloaded archives.
+            foreach (var name in items)
+                if (!File.Exists(Path.Combine(source, name)) && !Directory.Exists(Path.Combine(source, name)))
+                    throw new InvalidDataException("Paketbestandteil fehlt: " + name);
+            if (!File.Exists(Path.Combine(source, "Host", "Genesis.Host.exe")) ||
+                !File.Exists(Path.Combine(source, "UI", "Genesis.UI.exe")))
+                throw new InvalidDataException("Host oder Command Deck fehlt.");
+            _progress.Value = 50;
+            if (AppIsRunning()) throw new IOException("GENESIS wurde während der Prüfung erneut gestartet.");
+            backup = Path.Combine(parent, ".genesis-backup-" + DateTime.Now.ToString("yyyyMMdd-HHmmss") +
+                "-" + Guid.NewGuid().ToString("N")[..6]);
+            Directory.CreateDirectory(backup);
+            try
+            {
+                foreach (var name in items)
+                {
+                    var current = Path.Combine(_installation, name);
+                    if (!File.Exists(current) && !Directory.Exists(current)) continue;
+                    var destination = Path.Combine(backup, name);
+                    if (Directory.Exists(current)) Directory.Move(current, destination);
+                    else File.Move(current, destination);
+                    saved.Add(name);
+                }
+                _progress.Value = 70;
+                foreach (var name in items)
+                {
+                    var origin = Path.Combine(source, name);
+                    var destination = Path.Combine(_installation, name);
+                    if (Directory.Exists(origin)) Directory.Move(origin, destination);
+                    else File.Move(origin, destination);
+                    installed.Add(name);
+                }
+                _progress.Value = 100;
+                Log("Update erfolgreich. Sicherheitskopie: " + backup);
+                Log("Die alte Programmversion kann bei Bedarf aus der Sicherung wiederhergestellt werden.");
+                MessageBox.Show(this, "GENESIS wurde aktualisiert. Die bisherige Version ist gesichert.",
+                    "Update erfolgreich", MessageBoxButtons.OK, MessageBoxIcon.Information);
+            }
+            catch
+            {
+                Log("Fehler beim Ersetzen; automatische Wiederherstellung wird versucht.");
+                foreach (var name in installed.AsEnumerable().Reverse())
+                {
+                    var destination = Path.Combine(_installation, name);
+                    if (Directory.Exists(destination)) Directory.Delete(destination, recursive: true);
+                    else if (File.Exists(destination)) File.Delete(destination);
+                }
+                foreach (var name in saved.AsEnumerable().Reverse())
+                {
+                    var old = Path.Combine(backup, name);
+                    var destination = Path.Combine(_installation, name);
+                    if (Directory.Exists(old)) Directory.Move(old, destination);
+                    else if (File.Exists(old)) File.Move(old, destination);
+                }
+                throw;
+            }
+        }
+        catch (Exception ex)
+        {
+            Log("UPDATE ABGEBROCHEN: " + ex.Message);
+            Log("Bitte die Installation und den Sicherungsordner prüfen, bevor JOSHUA neu gestartet wird.");
+            MessageBox.Show(this, ex.Message, "Update nicht durchgeführt",
+                MessageBoxButtons.OK, MessageBoxIcon.Error);
+        }
+        finally
+        {
+            try { if (Directory.Exists(temp)) Directory.Delete(temp, recursive: true); }
+            catch (Exception ex) { Log("Temporäre Dateien konnten nicht gelöscht werden: " + ex.Message); }
+            var logPath = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
+                "JoshuaSpike5Genesis", "updater.log");
+            try
+            {
+                Directory.CreateDirectory(Path.GetDirectoryName(logPath)!);
+                await File.AppendAllTextAsync(logPath, _log.Text + Environment.NewLine);
+            }
+            catch { /* logging failure must not hide installation result */ }
+            _busy = false; _install.Enabled = true; _choose.Enabled = true; _launch.Enabled = true;
+        }
+    }
+}
+========== END FILE: src/Genesis.Updater/Program.cs ==========
