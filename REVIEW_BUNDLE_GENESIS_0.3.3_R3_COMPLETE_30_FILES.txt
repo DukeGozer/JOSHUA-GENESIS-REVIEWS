@@ -8,7 +8,7 @@ FILE COUNT: 30
 Complete sources and Git blob SHAs. R3 real GPU/rollback tests are PENDING. Previous R2 live 30-minute baseline: 190 responses completed, 49 expected cancels, 10 generation failures (5 repetition and 5 length). Do not infer production safety from Windows CI.
 
 ========== BEGIN FILE: .github/workflows/windows-build.yml ==========
-GIT-BLOB-SHA: 6354cabfb53109df960d5e177c0be2168c01147f
+GIT-BLOB-SHA: 789b12698e0b4b6ecbdb977bf5ef076f98cc0633
 name: Windows build
 
 on:
@@ -54,16 +54,15 @@ jobs:
       - name: Upload Windows build artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: GENESIS-0.3.2-R1-win-x64-UNREVIEWED
+          name: GENESIS-0.3.3-R3-win-x64-UNREVIEWED
           path: dist/JoshuaSpike5Genesis-win-x64/
           retention-days: 7
           if-no-files-found: error
-
 ========== END FILE: .github/workflows/windows-build.yml ==========
 
 ========== BEGIN FILE: src/Genesis.Contracts/Genesis.Contracts.csproj ==========
-GIT-BLOB-SHA: e3094572b46f5594c702d7593a8eb5b779b7b635
-<Project Sdk="Microsoft.NET.Sdk"><PropertyGroup><Version>0.3.2</Version><AssemblyVersion>0.3.2.0</AssemblyVersion><FileVersion>0.3.2.0</FileVersion><InformationalVersion>0.3.2-R1-alpha</InformationalVersion><TargetFramework>net8.0</TargetFramework><Nullable>enable</Nullable><ImplicitUsings>enable</ImplicitUsings></PropertyGroup></Project>
+GIT-BLOB-SHA: 4806e8b6734557e72ef853cb8b9622aaccc68ba3
+<Project Sdk="Microsoft.NET.Sdk"><PropertyGroup><Version>0.3.3</Version><AssemblyVersion>0.3.3.0</AssemblyVersion><FileVersion>0.3.3.0</FileVersion><InformationalVersion>0.3.3-R3-alpha</InformationalVersion><TargetFramework>net8.0</TargetFramework><Nullable>enable</Nullable><ImplicitUsings>enable</ImplicitUsings></PropertyGroup></Project>
 ========== END FILE: src/Genesis.Contracts/Genesis.Contracts.csproj ==========
 
 ========== BEGIN FILE: src/Genesis.Contracts/Protocol.cs ==========
@@ -98,8 +97,8 @@ public sealed class Snapshot
 ========== END FILE: src/Genesis.Contracts/Protocol.cs ==========
 
 ========== BEGIN FILE: src/Genesis.Host/Genesis.Host.csproj ==========
-GIT-BLOB-SHA: be1da99327d8c7f45e5fc09f722c95f1fd4c000a
-<Project Sdk="Microsoft.NET.Sdk"><PropertyGroup><Version>0.3.2</Version><AssemblyVersion>0.3.2.0</AssemblyVersion><FileVersion>0.3.2.0</FileVersion><InformationalVersion>0.3.2-R1-alpha</InformationalVersion><OutputType>WinExe</OutputType><TargetFramework>net8.0</TargetFramework><Nullable>enable</Nullable><ImplicitUsings>enable</ImplicitUsings></PropertyGroup><ItemGroup><ProjectReference Include="../Genesis.Contracts/Genesis.Contracts.csproj" /><ProjectReference Include="../Genesis.Storage/Genesis.Storage.csproj" /><ProjectReference Include="../Genesis.Ollama/Genesis.Ollama.csproj" /></ItemGroup></Project>
+GIT-BLOB-SHA: 9ae592e5fe3abc33264dde08ec5621dc580c63c9
+<Project Sdk="Microsoft.NET.Sdk"><PropertyGroup><Version>0.3.3</Version><AssemblyVersion>0.3.3.0</AssemblyVersion><FileVersion>0.3.3.0</FileVersion><InformationalVersion>0.3.3-R3-alpha</InformationalVersion><OutputType>WinExe</OutputType><TargetFramework>net8.0</TargetFramework><Nullable>enable</Nullable><ImplicitUsings>enable</ImplicitUsings></PropertyGroup><ItemGroup><ProjectReference Include="../Genesis.Contracts/Genesis.Contracts.csproj" /><ProjectReference Include="../Genesis.Storage/Genesis.Storage.csproj" /><ProjectReference Include="../Genesis.Ollama/Genesis.Ollama.csproj" /></ItemGroup></Project>
 ========== END FILE: src/Genesis.Host/Genesis.Host.csproj ==========
 
 ========== BEGIN FILE: src/Genesis.Host/Program.cs ==========
@@ -1018,8 +1017,8 @@ public static class PipeLineCodec
 ========== END FILE: src/Genesis.Host/PipeLineCodec.cs ==========
 
 ========== BEGIN FILE: src/Genesis.UI/Genesis.UI.csproj ==========
-GIT-BLOB-SHA: 7555c87d3630afdb0d0b797beb61ed324adbfd60
-<Project Sdk="Microsoft.NET.Sdk"><PropertyGroup><Version>0.3.2</Version><AssemblyVersion>0.3.2.0</AssemblyVersion><FileVersion>0.3.2.0</FileVersion><InformationalVersion>0.3.2-R1-alpha</InformationalVersion><OutputType>WinExe</OutputType><TargetFramework>net8.0-windows</TargetFramework><UseWPF>true</UseWPF><EnableWindowsTargeting>true</EnableWindowsTargeting><Nullable>enable</Nullable><ImplicitUsings>enable</ImplicitUsings></PropertyGroup><ItemGroup><ProjectReference Include="../Genesis.Contracts/Genesis.Contracts.csproj" /></ItemGroup></Project>
+GIT-BLOB-SHA: 0664d6d5933483ae0b99f9143efbd201b40dc616
+<Project Sdk="Microsoft.NET.Sdk"><PropertyGroup><Version>0.3.3</Version><AssemblyVersion>0.3.3.0</AssemblyVersion><FileVersion>0.3.3.0</FileVersion><InformationalVersion>0.3.3-R3-alpha</InformationalVersion><OutputType>WinExe</OutputType><TargetFramework>net8.0-windows</TargetFramework><UseWPF>true</UseWPF><EnableWindowsTargeting>true</EnableWindowsTargeting><Nullable>enable</Nullable><ImplicitUsings>enable</ImplicitUsings></PropertyGroup><ItemGroup><ProjectReference Include="../Genesis.Contracts/Genesis.Contracts.csproj" /></ItemGroup></Project>
 ========== END FILE: src/Genesis.UI/Genesis.UI.csproj ==========
 
 ========== BEGIN FILE: src/Genesis.UI/App.xaml ==========
@@ -1755,9 +1754,9 @@ public partial class MainWindow : Window
 ========== END FILE: src/Genesis.UI/MainWindow.xaml.cs ==========
 
 ========== BEGIN FILE: src/Genesis.Storage/Genesis.Storage.csproj ==========
-GIT-BLOB-SHA: fbcfce4241af5399de03b1561f1f2969ab4b9c2e
+GIT-BLOB-SHA: 5d5e64c25fef62fab679001bf7ed7f2ff9be1902
 <Project Sdk="Microsoft.NET.Sdk">
-  <PropertyGroup><Version>0.3.2</Version><AssemblyVersion>0.3.2.0</AssemblyVersion><FileVersion>0.3.2.0</FileVersion><InformationalVersion>0.3.2-alpha-candidate</InformationalVersion><TargetFramework>net8.0</TargetFramework><Nullable>enable</Nullable><ImplicitUsings>enable</ImplicitUsings></PropertyGroup>
+  <PropertyGroup><Version>0.3.3</Version><AssemblyVersion>0.3.3.0</AssemblyVersion><FileVersion>0.3.3.0</FileVersion><InformationalVersion>0.3.3-R3-alpha</InformationalVersion><TargetFramework>net8.0</TargetFramework><Nullable>enable</Nullable><ImplicitUsings>enable</ImplicitUsings></PropertyGroup>
   <ItemGroup>
     <PackageReference Include="Microsoft.Data.Sqlite" Version="8.0.11" />
     <ProjectReference Include="../Genesis.Contracts/Genesis.Contracts.csproj" />
@@ -2097,9 +2096,9 @@ public sealed class SnapshotStore : IDisposable
 ========== END FILE: src/Genesis.Storage/SnapshotStore.cs ==========
 
 ========== BEGIN FILE: src/Genesis.Ollama/Genesis.Ollama.csproj ==========
-GIT-BLOB-SHA: 12c94866daa1a29ec439e450ee3c093e16960628
+GIT-BLOB-SHA: e7fa8cbdfe1a099569ab82729804e3f41a955f68
 <Project Sdk="Microsoft.NET.Sdk">
-  <PropertyGroup><Version>0.3.2</Version><AssemblyVersion>0.3.2.0</AssemblyVersion><FileVersion>0.3.2.0</FileVersion><InformationalVersion>0.3.2-alpha-candidate</InformationalVersion><TargetFramework>net8.0</TargetFramework><Nullable>enable</Nullable><ImplicitUsings>enable</ImplicitUsings></PropertyGroup>
+  <PropertyGroup><Version>0.3.3</Version><AssemblyVersion>0.3.3.0</AssemblyVersion><FileVersion>0.3.3.0</FileVersion><InformationalVersion>0.3.3-R3-alpha</InformationalVersion><TargetFramework>net8.0</TargetFramework><Nullable>enable</Nullable><ImplicitUsings>enable</ImplicitUsings></PropertyGroup>
 </Project>
 ========== END FILE: src/Genesis.Ollama/Genesis.Ollama.csproj ==========
 
@@ -3454,7 +3453,7 @@ Write-Host "Start ohne Konsole: $out\Genesis.Launcher.exe"
 ========== END FILE: scripts/build-release.ps1 ==========
 
 ========== BEGIN FILE: src/Genesis.Launcher/Genesis.Launcher.csproj ==========
-GIT-BLOB-SHA: 246ed493ceb873b7718d0663df5d6c2e9cf1a527
+GIT-BLOB-SHA: 23ac25e743d1aa4a1d86e7be3d2529cee3ebba51
 <Project Sdk="Microsoft.NET.Sdk">
   <PropertyGroup>
     <OutputType>WinExe</OutputType>
@@ -3463,7 +3462,7 @@ GIT-BLOB-SHA: 246ed493ceb873b7718d0663df5d6c2e9cf1a527
     <EnableWindowsTargeting>true</EnableWindowsTargeting>
     <Nullable>enable</Nullable>
     <ImplicitUsings>enable</ImplicitUsings>
-    <Version>0.3.2</Version><AssemblyVersion>0.3.2.0</AssemblyVersion><FileVersion>0.3.2.0</FileVersion><InformationalVersion>0.3.2-R1-alpha</InformationalVersion>
+    <Version>0.3.3</Version><AssemblyVersion>0.3.3.0</AssemblyVersion><FileVersion>0.3.3.0</FileVersion><InformationalVersion>0.3.3-R3-alpha</InformationalVersion>
   </PropertyGroup>
 </Project>
 ========== END FILE: src/Genesis.Launcher/Genesis.Launcher.csproj ==========
